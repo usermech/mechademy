@@ -4,21 +4,34 @@ from matplotlib.colors import ListedColormap
 
 class SemanticMap():
     def __init__(self):
+
+        # top_down_map is a numpy array with shape (height, width, 3) where each pixel represents the occupancy of that cell for the environment
         self.top_down_map = None
         self.free_space_mask = None
         self.poses = None
-        # self.stuff_classes = None
+        
+        # self.stuff_classes = None    # Not used for now
+        self.instance_id_to_name = {}
         self.rgb_observations = {}
         self.semantic_observations = {}
-        self.semantic_predictions = {}
-        self.keypoint_features = {}
+        self.semantic_predictions = None
+
+        self.keypoints = None
+        self.descriptors = None
+
         self.masks = {}
-        self.instance_id_to_name = {}
+        
     
     def load_map(self, map_path):
         """
         Loads the top-down map from a given path and creates a free space mask.
         The map is expected to be a 2D numpy array
+
+        Arguments:
+            map_path: Path to the map file (string).
+        Returns:
+            top_down_map: A numpy array representing the top-down map. [height, width, 3]
+            free_space_mask: A boolean mask indicating free space in the map. [height, width]
         """
         
         self.top_down_map = np.load(map_path).astype(int)
