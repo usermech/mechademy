@@ -14,7 +14,8 @@ class SemanticMap():
         self.instance_id_to_name = {}
         self.rgb_observations = {}
         self.semantic_observations = {}
-        self.semantic_predictions = None
+        self.semantic_prediction_masks = None
+        self.semantic_prediction_instance_ids = None
 
         self.keypoints = None
         self.descriptors = None

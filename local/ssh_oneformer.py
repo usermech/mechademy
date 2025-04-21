@@ -102,7 +102,9 @@ def main():
     
     with gzip.open(local_predictions_path, "rb") as f:
         predictions = pickle.load(f)
-    semantic_map.semantic_predictions = predictions
+    semantic_map.semantic_prediction_masks = {k:v[0] for k, v in predictions.items()}
+    semantic_map.semantic_prediction_instance_ids = {k:v[1] for k, v in predictions.items()}
+
 
     with gzip.open(local_object_path, "wb") as f:
         pickle.dump(semantic_map, f)
