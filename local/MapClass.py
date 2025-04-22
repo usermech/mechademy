@@ -22,7 +22,6 @@ class SemanticMap():
         self.keypoints = None
         self.descriptors = None
 
-        self.masks = {}
         
     
     def load_map(self, map_path):
@@ -143,3 +142,12 @@ class SemanticMap():
                     self.refined_prediction_masks[idx][label_idx] = refined_mask
                     label_idx += 1
         return self.refined_prediction_masks
+    
+    def get_valid_keypoints(self,img_id,mask_id):
+        keypoints = self.keypoints[img_id].copy()
+        keypoints = np.round(keypoints).astype(int)
+        mask = self.refined_prediction_masks[img_id][mask_id]
+        valid = mask[keypoints[:, 1], keypoints[:, 0]] == 1 
+        return keypoints[valid]
+        
+       
