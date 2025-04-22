@@ -106,7 +106,7 @@ def main():
     semantic_map.semantic_prediction_instance_ids = {k:v[1] for k, v in predictions.items()}
 
 
-    with gzip.open(local_object_path, "wb") as f:
+    with open(local_object_path, "wb") as f:
         pickle.dump(semantic_map, f)
 
     client.close()
