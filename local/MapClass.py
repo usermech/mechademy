@@ -94,13 +94,12 @@ class SemanticMap():
         else:   
             print(f"No semantic observation found for index {idx}.")
 
-    def refine_semantic_predictions(self,area_threshold = 100,padding=False):
+    def refine_semantic_predictions(self,area_threshold = 100):
         """
         Refines the semantic prediction masks by applying morphological operations.
         Also accounts for the 360 degree continuity.
         Arguments:
             area_threshold: Minimum area of the mask to be considered valid.
-            padding: Whether to apply padding to the masks.
         Returns:
             refined_masks: A dictionary of refined semantic prediction masks.
         """
@@ -121,9 +120,6 @@ class SemanticMap():
                 # Apply morphological operations to refine the mask
                 binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
                 binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-                # Add padding on the edges if specified
-                if padding:
-                    binary_mask = cv2.dilate(binary_mask, np.ones((3, 3), np.uint8), iterations=1)
 
                 num_labels, labeled_mask = cv2.connectedComponents(binary_mask, connectivity=8)
 
