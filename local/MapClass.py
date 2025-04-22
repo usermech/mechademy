@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+import pickle
+import cv2
 
 class SemanticMap():
     def __init__(self):
@@ -92,8 +94,56 @@ class SemanticMap():
         else:   
             print(f"No semantic observation found for index {idx}.")
 
+    def refine_semantic_predictions(self,area_threshold = 100,padding=False):
+        """
+        Refines the semantic prediction masks by applying morphological operations.
+        Also accounts for the 360 degree continuity.
+        Arguments:
+            area_threshold: Minimum area of the mask to be considered valid.
+            padding: Whether to apply padding to the masks.
+        Returns:
+            refined_masks: A dictionary of refined semantic prediction masks.
+        """
+        # Initialize the refined masks dictionary
+        self.refined_prediction_masks = {}
+        height, width = self.semantic_prediction_masks[0].numpy().copy().shape
+        # Iterate through the semantic prediction masks
+        for idx, mask in self.semantic_prediction_masks.items():
+            mask = mask.numpy().copy()
+            label_idx = 0
+            for seg_info in self.semantic_prediction_instance_ids[idx]:
+                label = seg_info["id"]
+                category = seg_info["category_id"]
+                # Check if the category is in the stuff classes to be excluded
+                if category in [0, 2, 3, 5, 8, 11, 12, 13, 27]:
+                    continue
+                binary_mask = (mask==label).astype(np.uint8)
+                # Apply morphological operations to refine the mask
+                binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+                binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+                # Add padding on the edges if specified
+                if padding:
+                    binary_mask = cv2.dilate(binary_mask, np.ones((3, 3), np.uint8), iterations=1)
 
-    
+                num_labels, labeled_mask = cv2.connectedComponents(binary_mask, connectivity=8)
 
-    
-    
+                for row in range(height):
+                    left_pixel_label = labeled_mask[row, 0]
+                    right_pixel_label = labeled_mask[row, width - 1]
+
+                    if left_pixel_label != right_pixel_label and left_pixel_label != 0 and right_pixel_label != 0:
+                        labeled_mask[labeled_mask == right_pixel_label] = left_pixel_label
+                
+                for i in range(1, num_labels):
+                    if np.sum(labeled_mask == i) < area_threshold:
+                        continue
+                    # Create a new mask for each label
+                    refined_mask = np.zeros_like(binary_mask)
+                    refined_mask[labeled_mask == i] = 1
+                    # Initialize the dictionary for this index if not already done
+                    if idx not in self.refined_prediction_masks:
+                        self.refined_prediction_masks[idx] = {}
+                    # Store the refined mask in the dictionary
+                    self.refined_prediction_masks[idx][label_idx] = refined_mask
+                    label_idx += 1
+        return self.refined_prediction_masks
