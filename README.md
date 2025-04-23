@@ -15,6 +15,38 @@ git branch
 ```sh
 git checkout <branch-name>
 ```
+# Using the Pipeline
+## Fetching Observations From Remote Machine
+
+Two scripts are available for retrieving image observations from Habitat-Sim environments:
+
+- `ssh_explore_hm3d.py`: Simulates a robot exploring the environment one step at a time.
+- `ssh_extract_hm3d.py`: Extracts multiple image observations uniformly or randomly across the environment.
+
+You can specify different scenes using the `--env` command-line argument.
+
+```sh
+# Example usage for sampling observations:
+python ssh_extract_hm3d.py --env <env-name>
+```
+
+This command will generate a file named `semantic_map_<env-name>.pkl` in your local directory.
+The file contains a pickled SemanticMap instance representing the collected observations.
+
+## Semantic Segmentation
+
+The segmentation script ssh_oneformer.py requires the previously generated semantic_map_<env-name>.pkl file to be present in your local folder.
+
+It processes the image observations using semantic segmentation and updates the .pkl file with the new results.
+
+```sh 
+# Example usage for semantic segmentation:
+python ssh_oneformer.py` --env <env-name>
+```
+
+⚠️ Note: Ensure that <env-name> matches the environment name used when generating the semantic_map_<env-name>.pkl file.
+
+## 
 # 🌿 What is the Feature Branch Workflow?
 
 It’s a Git workflow where **each new feature, bug fix, or task is done in its own separate branch**, instead of working directly on `main`. When the work is done, the branch is merged into `main` via a **pull request (PR)**.
