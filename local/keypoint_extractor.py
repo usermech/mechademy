@@ -102,6 +102,6 @@ if __name__ == "__main__":
     semantic_map.keypoint_full_outputs = outputs
 
     # Save the updated semantic map object
-    with open("step3.pkl", "wb") as f:
+    with open("semantic_map_00800-TEEsavR23oF.pkl", "wb") as f:
         pickle.dump(semantic_map, f)
     
