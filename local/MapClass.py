@@ -1,25 +1,44 @@
 import numpy as np
+import gzip
+import os
+import pickle
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 class SemanticMap():
     def __init__(self):
 
-        # top_down_map is a numpy array with shape (height, width, 3) where each pixel represents the occupancy of that cell for the environment
+        # top_down_map, numpy array 3 boyutlu [height, weight, 3] şeklinde. Haritanın üstten görüntüsü.
         self.top_down_map = None
+
+        # free_space_mask, shape'i [height, weight] şeklinde. Haritada boş kısımları verir
         self.free_space_mask = None
+
+        # poses, shape'i [num_poses, 3], kameranın konumunu verir.  
         self.poses = None
         
-        # self.stuff_classes = None    # Not used for now
+        # instance_id_to_name, sınıfın bir instancesinin hafızadaki adresini tutar. Dict'tir
         self.instance_id_to_name = {}
+
+        # rgb_observations, keys, observations index'i RGB olarak saklar. Dict'tir
         self.rgb_observations = {}
+
+        # semantic_observations, üsttekinin semantic versiyonu. Dict'tir
         self.semantic_observations = {}
+
+        # # semantic_prediction_masks, semantik tahmin maskeleri saklar, şekil: [height, width]
         self.semantic_prediction_masks = None
+
+        # semantic_prediction_instance_ids, instance id'lerini tutar
         self.semantic_prediction_instance_ids = None
 
+        # keypoints, anahtar noktaların koordinatlarını tutar
         self.keypoints = None
+
+        # descriptors, anahtar noktalarla ilişkili tanımlayıcılardır.
         self.descriptors = None
 
+        # masks, Farklı semantic/instance sınıflarına ait binary maskeleri tutabilir. Dict'tir
         self.masks = {}
         
     
@@ -36,8 +55,9 @@ class SemanticMap():
         """
         
         self.top_down_map = np.load(map_path).astype(int)
-        recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]])
-        self.top_down_map = recolor_map[self.top_down_map]
+        if self.top_down_map.ndim == 2:
+            recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]])
+            self.top_down_map = recolor_map[self.top_down_map]
         self.free_space_mask = np.all(self.top_down_map == [128, 128, 128], axis=-1)
         return self.top_down_map, self.free_space_mask
     
@@ -92,8 +112,16 @@ class SemanticMap():
         else:   
             print(f"No semantic observation found for index {idx}.")
 
+"""
+    os.chdir("C:/Users/ofsaa/Desktop/mechacademy/mechademy/local")
 
-    
+    semantic_map = SemanticMap()
 
-    
-    
+    top_down_map, free_space_mask = semantic_map.load_map("top_down_map_last.npy")
+    print("Harita yüklendi:", top_down_map.shape, free_space_mask.shape)
+
+
+    print(semantic_map.set_instance_id_to_name)  
+    print(semantic_map.set_instance_id_to_name({1: "wall", 2: "floor", 3: "chair"}))  
+    print(semantic_map.get_semantic_class_names())
+"""
