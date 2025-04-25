@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import pickle
 import cv2
+from collections import Counter
 
 class SemanticMap():
     def __init__(self):
@@ -18,6 +19,7 @@ class SemanticMap():
         self.semantic_observations = {}
         self.semantic_prediction_masks = None
         self.semantic_prediction_instance_ids = None
+        self.gt_pred_correspondences = {}
 
         self.keypoints = None
         self.descriptors = None
@@ -92,6 +94,13 @@ class SemanticMap():
             plt.show()
         else:   
             print(f"No semantic observation found for index {idx}.")
+    
+    def refine_semantic_labels(self,remove_list = ["wall","ceiling","floor","window"]):
+        self.refined_instance_id_to_name = {}   # Create an empty dictionary for filtering
+        for obj_label, obj_class in self.instance_id_to_name.items():
+            if obj_class in remove_list:
+                continue    # Skip if the object is in remove_list
+            self.refined_instance_id_to_name[obj_label] = obj_class     # If not add to the new dictionary.
 
     def refine_semantic_predictions(self,area_threshold = 100):
         """
@@ -100,7 +109,8 @@ class SemanticMap():
         Arguments:
             area_threshold: Minimum area of the mask to be considered valid.
         Returns:
-            refined_masks: A dictionary of refined semantic prediction masks.
+            None
+            Stores the data in self.refined_prediction_masks
         """
         # Initialize the refined masks dictionary
         self.refined_prediction_masks = {}
@@ -141,7 +151,6 @@ class SemanticMap():
                     # Store the refined mask in the dictionary
                     self.refined_prediction_masks[idx][label_idx] = refined_mask
                     label_idx += 1
-        return self.refined_prediction_masks
     
     def get_valid_keypoints(self,img_id,mask_id):
         keypoints = self.keypoints[img_id].copy()
@@ -149,5 +158,114 @@ class SemanticMap():
         mask = self.refined_prediction_masks[img_id][mask_id]
         valid = mask[keypoints[:, 1], keypoints[:, 0]] == 1 
         return keypoints[valid]
+    
+    def match_predicted_object_with_gt(self,img_id,mask_id):
+        """
+        Match a predicted object in a binary mask to its corresponding
+        unique label in the ground truth segmentation mask. Uses most overlapping
+        label by pixel count.
+
+        Arguments:
+        img_id: Index of the observation for the predicted mask.
+        mask_id: Index of the predicted mask in the observation scene.
+        """
+        pred_mask = self.refined_prediction_masks[img_id][mask_id].copy()  # A binary mask where 1 indicates predicted pixels of a single object, 0 elsewhere.
+        gt_mask = self.semantic_observations[img_id].copy()    # A 2D array where each pixel has a unique integer label
+        overlap_gt_labels = gt_mask[pred_mask == 1]     # Only consider the ground truth pixels that the predicted mask covers
+        label_counts = Counter(overlap_gt_labels)
+
+        matched_label = label_counts.most_common(1)[0][0]   # The most common label is likely to be the correct label.
+        # Create binary mask for the matched GT label
+        gt_object_mask = (gt_mask == matched_label)
+
+        # Intersection and Union
+        intersection = np.logical_and(pred_mask, gt_object_mask).sum()
+        union = np.logical_or(pred_mask, gt_object_mask).sum()
+
+        iou = intersection / union if union > 0 else 0
+        
+        return matched_label, iou
+    
+    def match_predicted_object_with_gt_IoU(self,img_id,mask_id):
+        """
+        Match a predicted object in a binary mask to its corresponding
+        unique label in the ground truth segmentation mask. Use IoU over 
+        """
+        # YOUR CODE WILL BE WRITTEN HERE
+        return matched_label, iou
+    
+    def compute_all_gt_pred_correspondences(self):
+        """
+        Iterates through all predicted masks in self.refined_prediction_masks
+        and computes the ground truth correspondence for each using the 
+        match_predicted_object_with_gt method.
+
+        Stores the result in self.gt_pred_correspondences in the form:
+            self.gt_pred_correspondences[img_id][mask_id] = (matched_label, iou)
+        """
+        self.gt_pred_correspondences = {}
+
+        for img_id, masks in self.refined_prediction_masks.items():
+            self.gt_pred_correspondences[img_id] = {}
+            for mask_id in range(len(masks)):
+                matched_label, iou = self.match_predicted_object_with_gt(img_id, mask_id)
+                self.gt_pred_correspondences[img_id][mask_id] = (matched_label, iou)
+
+    def group_by_matched_label(self):
+        """
+        Groups all (img_id, mask_id) pairs in self.gt_pred_correspondences by their matched_label.
+
+        Returns:
+            A dictionary where keys are matched_label values, and values are lists of (img_id, mask_id).
+            Example:
+                {
+                    12: [(0, 1), (3, 0)],
+                    7: [(2, 2)],
+                    ...
+                }
+        """
+        label_to_predictions = {}
+
+        for img_id, masks in self.gt_pred_correspondences.items():
+            for mask_id, (matched_label, _) in masks.items():
+                if matched_label not in label_to_predictions:
+                    label_to_predictions[matched_label] = []
+                label_to_predictions[matched_label].append((img_id, mask_id))
+
+        return label_to_predictions
+    
+    def compare_gt_pred_correspondences(self, other_correspondences):
+        """
+        Compares the current self.gt_pred_correspondences with another set of correspondences.
+
+        Args:
+            other_correspondences (dict): A nested dictionary of the same structure:
+                other_correspondences[img_id][mask_id] = (matched_label, iou)
+
+        Returns:
+            List of (img_id, mask_id) tuples where the correspondences differ.
+        """
+        conflicts = []
+
+        for img_id in self.gt_pred_correspondences:
+            if img_id not in other_correspondences:
+                continue
+            for mask_id in self.gt_pred_correspondences[img_id]:
+                if mask_id not in other_correspondences[img_id]:
+                    continue
+
+                current_match = self.gt_pred_correspondences[img_id][mask_id]
+                other_match = other_correspondences[img_id][mask_id]
+
+                if current_match != other_match:
+                    conflicts.append((img_id, mask_id))
+
+        return conflicts
+    
+
+    
+
+
+
         
        
