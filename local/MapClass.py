@@ -4,6 +4,9 @@ from matplotlib.colors import ListedColormap
 import pickle
 import cv2
 from collections import Counter
+import networkx as nx
+from lightglue import LightGlue
+import torch
 
 class SemanticMap():
     def __init__(self):
@@ -23,9 +26,12 @@ class SemanticMap():
 
         self.keypoints = None
         self.descriptors = None
+        self.keypoint_full_outputs = None
 
-        
-    
+        self.G = nx.Graph()
+        self.device = 'cuda'
+        self.matcher = LightGlue(features="superpoint").eval().to(self.device)
+
     def load_map(self, map_path):
         """
         Loads the top-down map from a given path and creates a free space mask.
@@ -261,6 +267,48 @@ class SemanticMap():
                     conflicts.append((img_id, mask_id))
 
         return conflicts
+    
+    def match_keypoints(self,feats0,feats1):
+        """
+        Matches keypoints between images using LightGlue.
+        """
+        feats0 = feats0.copy()
+        feats1 =feats1.copy()
+
+        feats0['keypoints'] = torch.tensor(feats0['keypoints']).to(self.device).unsqueeze(0)
+        feats0['descriptors'] = torch.tensor(feats0['descriptors']).to(self.device).unsqueeze(0)
+        feats0['keypoint_scores'] = torch.tensor(feats0['keypoint_scores']).to(self.device).unsqueeze(0)
+        feats0['image_size'] = torch.tensor(feats0['image_size']).to(self.device).unsqueeze(0)
+
+        feats1['keypoints'] = torch.tensor(feats1['keypoints']).to(self.device).unsqueeze(0)
+        feats1['descriptors'] = torch.tensor(feats1['descriptors']).to(self.device).unsqueeze(0)
+        feats1['keypoint_scores'] = torch.tensor(feats1['keypoint_scores']).to(self.device).unsqueeze(0)
+        feats1['image_size'] = torch.tensor(feats1['image_size']).to(self.device).unsqueeze(0)
+
+        matches = self.matcher({"image0": feats0, "image1": feats1})
+
+        return matches
+    
+    def build_graph(self):
+        k=0
+        for node,f0 in self.keypoint_full_outputs.items():
+            if node not in self.G.nodes:
+                self.G.add_node(node)
+            for neighbor in range(node+1,len(self.keypoint_full_outputs)):
+                if k % 100 == 0:
+                    print(f"{2*(k+1)/(len(self.keypoint_full_outputs)*(len(self.keypoint_full_outputs)-1))*100:.2f}%")
+                k += 1
+                if neighbor not in self.G.nodes:
+                    self.G.add_node(neighbor)
+                matches01 = self.match_keypoints(f0,self.keypoint_full_outputs[neighbor])
+                matches = matches01["matches"][0]
+                if len(matches) > 180:
+                    self.G.add_edge(node,neighbor,matches=matches)
+
+                
+                    
+                
+
     
 
     
