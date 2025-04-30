@@ -1,9 +1,48 @@
 import numpy as np
+from scipy.cluster.hierarchy import linkage,fcluster
+import pickle
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import MapClass
 
 def method1():
     pass
-def method2():
-    pass 
+
+def method2(semantic_map,feature_num,distance_type,n_clusters,merge_method="ward"):
+    print("Calculating Distances")
+    distances, valid_masks = generate_distance_matrix_subspace(semantic_map,feature_num,distance_type)
+    print(distances)
+    print("Clustering...")
+    linked = linkage(distances, method=merge_method)
+    clusters = fcluster(linked, t=n_clusters, criterion='maxclust')
+    print("Done!")
+    return clusters, valid_masks
+
+def generate_distance_matrix_subspace(semantic_map,k,distance_type="projection"):
+    mask_ids = []
+    subspaces = []
+    for img_id, local_masks in semantic_map.refined_prediction_masks.items():
+        for mask_id in local_masks.keys():
+            _,valid_indices = semantic_map.get_valid_keypoints(img_id,mask_id)
+            data_points = semantic_map.descriptors[img_id][valid_indices].copy()
+            if data_points.shape[0] < k:
+                continue
+            subspaces.append(get_subspace(data_points.T,k))
+            mask_ids.append((img_id,mask_id))
+    distances = np.zeros((len(subspaces), len(subspaces)))
+
+    # Compute the pairwise distances only for the upper triangle (including diagonal)
+    for i in range(len(subspaces)):
+        for j in range(i, len(subspaces)):  # j starts from i to avoid redundant calculations
+            if distance_type == "projection":
+                dist = projection_distance(subspaces[i], subspaces[j])
+            elif distance_type == "chordal_distance":
+                dist = chordal_distance(subspaces[i], subspaces[j])
+            distances[i, j] = dist
+            distances[j, i] = dist
+    return distances, mask_ids
 
 def get_subspace(M,k):
     """
@@ -82,3 +121,25 @@ def chordal_distance(U, V):
     sigma = np.linalg.svd(M, compute_uv=False)
     sin_squared = 1 - sigma**2
     return np.sqrt(np.sum(sin_squared))
+
+def compare_with_gt(object_dict, clusters, valid_masks):
+    pred_dict = {}
+    for object_label, masks_list in object_dict.items():
+        for masks in masks_list:
+            if masks in valid_masks:
+                index = valid_masks.index(masks)
+                if object_label not in pred_dict:
+                    pred_dict[object_label] = []
+                pred_dict[object_label].append(clusters[index])
+    return pred_dict
+
+def main():
+    with open('../latest.pkl','rb') as f:
+        semantic_map = pickle.load(f)
+    object_dict = semantic_map.group_by_matched_label()
+    sorted_object_dict = dict(sorted(object_dict.items()))
+    clusters, valid_masks = method2(semantic_map,15,"projection",40)
+    print(compare_with_gt(sorted_object_dict,clusters, valid_masks))
+
+if __name__ == "__main__":
+    main()

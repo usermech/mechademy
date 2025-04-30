@@ -163,7 +163,7 @@ class SemanticMap():
         keypoints = np.round(keypoints).astype(int)
         mask = self.refined_prediction_masks[img_id][mask_id]
         valid = mask[keypoints[:, 1], keypoints[:, 0]] == 1 
-        return keypoints[valid]
+        return keypoints[valid], valid
     
     def match_predicted_object_with_gt(self,img_id,mask_id):
         """
@@ -213,7 +213,7 @@ class SemanticMap():
 
         for img_id, masks in self.refined_prediction_masks.items():
             self.gt_pred_correspondences[img_id] = {}
-            for mask_id in range(len(masks)):
+            for mask_id in masks.keys():
                 matched_label, iou = self.match_predicted_object_with_gt(img_id, mask_id)
                 self.gt_pred_correspondences[img_id][mask_id] = (matched_label, iou)
 
