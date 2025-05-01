@@ -7,6 +7,7 @@ import argparse
 import os
 import gzip
 
+
 def parse_arguments():    
     parser = argparse.ArgumentParser(
         description="SSH and run script on remote server",
@@ -53,7 +54,7 @@ def main():
         "conda_env": "oneformer",
         "oneformer_path": Path("/home/romer/umut/segmentation/OneFormer"),
     }
-    local_object_path = Path(f"./semantic_map_{args.env}.pkl")
+    local_object_path = Path("C:/Users/ofsaa/Desktop/mechacademy/mechademy/local") / f"semantic_map_{args.env}.pkl"
     remote_script = CONFIG["oneformer_path"]  / "oneformer_infere.py"
     local_file_path = Path("./rgb_observations.pkl.gz")
     # convert the local_file_path to full path

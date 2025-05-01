@@ -1,10 +1,13 @@
-
 import pickle
 import torch
+import os
+import gzip
 
 from lightglue import LightGlue, SuperPoint
 from lightglue.utils import numpy_image_to_torch
 
+os.chdir("C:/Users/ofsaa/Desktop/mechacademy/mechademy/local")
+print(os.listdir)
 
 class KeypointExtractor:
   
@@ -83,12 +86,12 @@ class KeypointExtractor:
         return matches
 
         
-if __name__ == "__main__":
+if __name__ == "__main__":  
 
     # Initialize the KeypointExtractor
-    extractor = KeypointExtractor(device="cuda")
+    extractor = KeypointExtractor(device="cpu")
     print("KeypointExtractor initialized.")
-    with open("semantic_map_00800-TEEsavR23oF.pkl", "rb") as f:
+    with gzip.open("semantic_map_00800-TEEsavR23oF.pkl", "rb") as f:
         semantic_map = pickle.load(f)
     print("Semantic map loaded.")
 
@@ -100,6 +103,9 @@ if __name__ == "__main__":
     semantic_map.keypoints = keypoints_dict
     semantic_map.descriptors = descriptors_dict
     semantic_map.keypoint_full_outputs = outputs
+
+    matches = extractor.match_keypoints(outputs, image1=0, image2=1)
+    print("Matches between image 0 and image 1:", matches)
 
     # Save the updated semantic map object
     with open("semantic_map_00800-TEEsavR23oF.pkl", "wb") as f:
