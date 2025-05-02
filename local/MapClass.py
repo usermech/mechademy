@@ -197,7 +197,7 @@ class SemanticMap():
         iou = 0
         matched_label = None
         
-        # Iterate over gt
+        # Iterate over gt mask
         for gt_mask_id, value1 in self.instance_id_to_name.items():
             gt_object_mask = (gt_mask == gt_mask_id)
 
