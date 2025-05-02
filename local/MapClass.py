@@ -191,7 +191,25 @@ class SemanticMap():
         Match a predicted object in a binary mask to its corresponding
         unique label in the ground truth segmentation mask. Use IoU over 
         """
-        # YOUR CODE WILL BE WRITTEN HERE
+        # Initialize
+        pred_mask = self.refined_prediction_masks[img_id][mask_id].copy()
+        gt_mask = self.semantic_observations[img_id].copy()
+        iou = 0
+        matched_label = None
+        
+        # Iterate over gt
+        for gt_mask_id, value1 in self.instance_id_to_name.items():
+            gt_object_mask = (gt_mask == gt_mask_id)
+
+            # Calulate intersection and union
+            intersection = np.logical_and(pred_mask, gt_object_mask).sum()
+            union = np.logical_or(pred_mask, gt_object_mask).sum()
+            
+            # Update prediction if current IoU value is higher
+            if iou < intersection / union:
+                iou = intersection / union
+                matched_label = gt_mask_id
+        
         return matched_label, iou
     
     def compute_all_gt_pred_correspondences(self):
