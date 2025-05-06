@@ -5,6 +5,8 @@ import os
 import sys
 import networkx as nx
 from collections import defaultdict, Counter
+import community
+from sklearn.cluster import SpectralClustering
 
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -18,14 +20,13 @@ import MapClass
 def method1():
     pass
 
-def method2(semantic_map,feature_num,distance_type,n_clusters,merge_method="ward"):
-    print("Calculating Distances")
+def method2(semantic_map,feature_num,distance_type,n_clusters,merge_method="average"):
     distances, valid_masks = generate_distance_matrix_subspace(semantic_map,feature_num,distance_type)
-    print(distances)
-    print("Clustering...")
+    distances = row_wise_min_max_normalize(distances)
+    distances = 0.5 * (distances + distances.T)
+
     linked = linkage(distances, method=merge_method)
     clusters = fcluster(linked, t=n_clusters, criterion='maxclust')
-    print("Done!")
     return clusters, valid_masks
 
 def method3(semantic_map, min_num_feature=15, score_threshold=0.3):
@@ -78,6 +79,92 @@ def method3(semantic_map, min_num_feature=15, score_threshold=0.3):
                     
     return edges_list
 
+def method4(semantic_map,feature_num,distance_type):
+    distances, valid_masks = generate_distance_matrix_subspace(semantic_map,feature_num,distance_type)
+    gt_correspondences = semantic_map.gt_pred_correspondences.copy()
+    edges_list = []
+    for label in range(distances.shape[0]):
+        cost = distances[label,:]
+        non_zero_mean = cost[cost != 0].mean()
+        cost[cost == 0] = non_zero_mean
+        similar_labels = z_score_low_anomaly(cost)
+        if similar_labels.shape[0]>0:
+            for similar_label in similar_labels:
+                target = valid_masks[label]
+                edges_list.append((target,valid_masks[similar_label]))
+    subgraphs = extract_subgraphs(edges_list)
+    return filter_subgraphs(subgraphs,edges_list,gt_correspondences)
+    
+def filter_subgraphs(subgraphs,edges_list,gt_correspondences):
+    true_labels, predicted_labels = [],[]
+    cluster_count = 0
+    for subgraph in subgraphs:
+        if len(subgraph) < 3:
+            continue
+        elif len(subgraph) >= 100:
+            true_labels,predicted_labels,cluster_count = partition_subgraph(subgraph,edges_list,gt_correspondences,true_labels, predicted_labels,cluster_count)
+        else:
+            for node in subgraph:
+                true_labels.append(gt_correspondences[node[0]][node[1]])
+                predicted_labels.append(cluster_count)
+            cluster_count += 1
+
+    return true_labels, predicted_labels 
+
+def partition_subgraph(subgraph,edges_list,gt_correspondences, true_labels, predicted_labels,cluster_count):
+    graph_edges = []
+    for match in edges_list:
+        if match[0] in subgraph and match[1] in subgraph:
+            graph_edges.append(match)
+    G = nx.Graph()
+    G.add_edges_from(graph_edges)
+    partition = community.best_partition(G)
+    for node, label in partition.items():
+        true_labels.append(gt_correspondences[node[0]][node[1]])
+        predicted_labels.append(int(label+cluster_count))
+    cluster_count += len(partition)
+    return true_labels, predicted_labels,cluster_count
+
+
+
+
+def row_wise_min_max_normalize(D, exclude_diagonal=True):
+
+    """
+    Normalizes each row of the distance matrix using min-max normalization.
+    
+    Parameters:
+    - D (ndarray): NxN distance matrix.
+    - exclude_diagonal (bool): Whether to exclude diagonal entries from min/max computation.
+
+    Returns:
+    - D_norm (ndarray): Row-normalized distance matrix.
+    """
+    D = np.array(D, dtype=float)  # Ensure it's a float array
+    D_norm = np.zeros_like(D)
+
+    for i in range(D.shape[0]):
+        row = D[i]
+        
+        if exclude_diagonal:
+            mask = np.arange(D.shape[1]) != i
+            row_min = np.min(row[mask])
+            row_max = np.max(row[mask])
+        else:
+            row_min = np.min(row)
+            row_max = np.max(row)
+
+        denom = row_max - row_min
+        if denom == 0:
+            D_norm[i] = 0  # or leave the row unchanged
+        else:
+            D_norm[i] = (row - row_min) / denom
+
+        if exclude_diagonal:
+            D_norm[i, i] = 0  # optionally keep diagonal at zero
+
+    return D_norm
+
 def cur_reduction(descriptors):
     # Take svd of the descriptors
     U, S, Vt = np.linalg.svd(descriptors, full_matrices=False)
@@ -117,6 +204,12 @@ def generate_distance_matrix_subspace(semantic_map,k,distance_type="projection")
     for img_id, local_masks in semantic_map.refined_prediction_masks.items():
         for mask_id in local_masks.keys():
             _,valid_indices = semantic_map.get_valid_keypoints(img_id,mask_id)
+            try:
+                score = semantic_map.gt_pred_correspondences[img_id][mask_id][1]
+            except:
+                continue
+            if score < 0.5:
+                continue
             data_points = semantic_map.descriptors[img_id][valid_indices].copy()
             if data_points.shape[0] < k:
                 continue
@@ -127,7 +220,9 @@ def generate_distance_matrix_subspace(semantic_map,k,distance_type="projection")
     # Compute the pairwise distances only for the upper triangle (including diagonal)
     for i in range(len(subspaces)):
         for j in range(i, len(subspaces)):  # j starts from i to avoid redundant calculations
-            if distance_type == "projection":
+            if i == j:
+                dist = 0
+            elif distance_type == "projection":
                 dist = projection_distance(subspaces[i], subspaces[j])
             elif distance_type == "chordal_distance":
                 dist = chordal_distance(subspaces[i], subspaces[j])
@@ -249,10 +344,19 @@ def extract_labels_from_subgraphs(subgraphs, gt_correspondences):
     return true_labels, predicted_labels, instances
 
 def z_score_low_anomaly(data, threshold=3.0):
-    mean = np.mean(data)
-    std = np.std(data)
-    z_scores = (data - mean) / std  # no abs() so it just gets lower anomalies
+    mean = np.nanmean(data)  # Computes the mean while ignoring NaNs
+    std = np.nanstd(data)    # Computes the std while ignoring NaNs
+    
+    # If the standard deviation is zero, we can't compute the z-scores
+    if std == 0:
+        print("Warning: Standard deviation is zero, can't compute z-scores.")
+        return np.array([])  # Return an empty array as no anomalies can be found
+    
+    # Calculate z-scores
+    z_scores = (data - mean) / std  # No abs() so it just gets lower anomalies
+
     return np.where(z_scores < -threshold)[0]
+
 
 def flatten_equivalents(equivalents):
     visited = {}
@@ -270,7 +374,7 @@ def flatten_equivalents(equivalents):
             cluster_id += 1
     return visited
 
-def merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,k=10,distance_type="projection"):
+def merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,k=10,distance_type="projection",z_threshold=3.0):
     subspaces = []
     for label, subgraph in enumerate(subgraphs):
         descriptors = np.empty((0,256))
@@ -285,7 +389,9 @@ def merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,k=10,d
     # Compute the pairwise distances only for the upper triangle (including diagonal)
     for i in range(len(subspaces)):
         for j in range(i, len(subspaces)):  # j starts from i to avoid redundant calculations
-            if distance_type == "projection":
+            if i == j:
+                dist = 0
+            elif distance_type == "projection":
                 dist = projection_distance(subspaces[i], subspaces[j])
             elif distance_type == "chordal_distance":
                 dist = chordal_distance(subspaces[i], subspaces[j])
@@ -295,9 +401,13 @@ def merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,k=10,d
     label_equivalents = defaultdict(set)    
     for label, subgraph in enumerate(subgraphs):
         cost = distances[label,:]
-        non_zero_mean = cost[cost != 0].mean()
+        filtered_cost = cost[cost != 0]
+        if filtered_cost.size > 0:
+            non_zero_mean = filtered_cost.mean()
+        else:
+            non_zero_mean = 0
         cost[cost == 0] = non_zero_mean
-        similar_labels = z_score_low_anomaly(cost)
+        similar_labels = z_score_low_anomaly(cost,z_threshold)
         if similar_labels.shape[0]>0:
             for similar_label in similar_labels:
                 label_equivalents[label].add(similar_label)
@@ -328,7 +438,7 @@ def main():
     feat_num_list = list(range(10,20,5))
     results = defaultdict(dict)
     gt_correspondences = semantic_map.gt_pred_correspondences.copy()
-    
+    """
     for feat_num in feat_num_list:
         for score in scores_list:
             print(f"Processing: feat_num={feat_num}, score={score}")
@@ -342,18 +452,52 @@ def main():
             results[(feat_num,score)]["true_object_num"] = len(np.unique(true_labels))
             results[(feat_num,score)]["instances"] = instances
             
-            merged_predicted_labels = merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,feat_num,"projection")
+            merged_predicted_labels = merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,feat_num,"chordal_distance",2.8)
             results[(feat_num,score)]["ari_score2"] = adjusted_rand_score(true_labels, merged_predicted_labels)
             results[(feat_num,score)]["homogeneity2"] = homogeneity_score(true_labels, merged_predicted_labels)
             results[(feat_num,score)]["completeness2"] = completeness_score(true_labels, merged_predicted_labels)
-            results[(feat_num,score)]["predicted_object_num2"] = len(np.unique(merge_predicted_labels_zscore))
+            results[(feat_num,score)]["predicted_object_num2"] = len(np.unique(merged_predicted_labels))
 
+            merged_predicted_labels = merge_predicted_labels_zscore(subgraphs,semantic_map,predicted_labels,feat_num,"chordal_distance",3.2)
+            results[(feat_num,score)]["ari_score3"] = adjusted_rand_score(true_labels, merged_predicted_labels)
+            results[(feat_num,score)]["homogeneity3"] = homogeneity_score(true_labels, merged_predicted_labels)
+            results[(feat_num,score)]["completeness3"] = completeness_score(true_labels, merged_predicted_labels)
+            results[(feat_num,score)]["predicted_object_num3"] = len(np.unique(merged_predicted_labels))
+
+             
+    with open('./method3_merge_results.pkl','wb') as f:
+        pickle.dump(results,f)
+      """
+    # edges_list = method3(semantic_map,15,0.2)
+    # subgraphs = extract_subgraphs(edges_list)
+    # true_labels, predicted_labels,instances = extract_labels_from_subgraphs(subgraphs,gt_correspondences)
+    true_labels,predicted_labels = method4(semantic_map,10,"chordal_distance")
+    print(f"ARI Score for method4 {adjusted_rand_score(true_labels, predicted_labels)}")
+    print(f"Homogeneity Score for method4 {homogeneity_score(true_labels, predicted_labels)}")
+    print(f"Completeness Score for method4 {completeness_score(true_labels, predicted_labels)}")
+    print(f"Number of predicted objects: {len(np.unique(predicted_labels))}")
+    print(f"Number of true objects: {len(np.unique(true_labels))}")
+    print(f"Number of total masks:{len(true_labels)}")
+
+    predicted_labels2,valid_masks = method2(semantic_map,15,"chordal_distance",len(np.unique(true_labels)))
+    """
+    true_labels2 = []
+    for img_id, mask_id in valid_masks:
+        try:
+            gt_label = gt_correspondences[img_id][mask_id][0]
+            true_labels2.append(gt_label)
+        except KeyError:
+            continue
+
+    print(f"ARI Score for method2 with chordal distance {adjusted_rand_score(true_labels2, predicted_labels2)}")
+    print(f"Homogeneity Score for method2 with chordal distance {homogeneity_score(true_labels2, predicted_labels2)}")
+    print(f"Completeness Score for method2 with chordal distance {completeness_score(true_labels2, predicted_labels2)}")
+    """
+        
             
  
 
-
-    with open('./method3_merge_results.pkl','wb') as f:
-        pickle.dump(results,f)    
+    
 
 if __name__ == "__main__":
     main()
