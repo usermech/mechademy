@@ -79,7 +79,7 @@ def method3(semantic_map, min_num_feature=15, score_threshold=0.3):
                     
     return edges_list
 
-def method4(semantic_map,feature_num,distance_type):
+def method4(semantic_map,feature_num,distance_type,partition,z_threshold=3.0):
     distances, valid_masks = generate_distance_matrix_subspace(semantic_map,feature_num,distance_type)
     gt_correspondences = semantic_map.gt_pred_correspondences.copy()
     edges_list = []
@@ -87,25 +87,26 @@ def method4(semantic_map,feature_num,distance_type):
         cost = distances[label,:]
         non_zero_mean = cost[cost != 0].mean()
         cost[cost == 0] = non_zero_mean
-        similar_labels = z_score_low_anomaly(cost)
+        similar_labels = z_score_low_anomaly(cost,z_threshold)
         if similar_labels.shape[0]>0:
             for similar_label in similar_labels:
                 target = valid_masks[label]
                 edges_list.append((target,valid_masks[similar_label]))
     subgraphs = extract_subgraphs(edges_list)
-    return filter_subgraphs(subgraphs,edges_list,gt_correspondences)
+    return filter_subgraphs(subgraphs,edges_list,gt_correspondences,partition)
     
-def filter_subgraphs(subgraphs,edges_list,gt_correspondences):
+def filter_subgraphs(subgraphs,edges_list,gt_correspondences,partition=False):
     true_labels, predicted_labels = [],[]
     cluster_count = 0
     for subgraph in subgraphs:
         if len(subgraph) < 3:
             continue
         elif len(subgraph) >= 100:
-            true_labels,predicted_labels,cluster_count = partition_subgraph(subgraph,edges_list,gt_correspondences,true_labels, predicted_labels,cluster_count)
+            if  partition:
+                true_labels,predicted_labels,cluster_count = partition_subgraph(subgraph,edges_list,gt_correspondences,true_labels, predicted_labels,cluster_count)
         else:
             for node in subgraph:
-                true_labels.append(gt_correspondences[node[0]][node[1]])
+                true_labels.append(gt_correspondences[node[0]][node[1]][0])
                 predicted_labels.append(cluster_count)
             cluster_count += 1
 
@@ -120,7 +121,7 @@ def partition_subgraph(subgraph,edges_list,gt_correspondences, true_labels, pred
     G.add_edges_from(graph_edges)
     partition = community.best_partition(G)
     for node, label in partition.items():
-        true_labels.append(gt_correspondences[node[0]][node[1]])
+        true_labels.append(gt_correspondences[node[0]][node[1]][0])
         predicted_labels.append(int(label+cluster_count))
     cluster_count += len(partition)
     return true_labels, predicted_labels,cluster_count
@@ -434,7 +435,7 @@ def main():
         semantic_map = pickle.load(f)
 
  
-    scores_list = [round(i*0.1,1) for i in range(2,9)]
+    scores_list = [round(i*0.1,1) for i in range(28,38,2)]
     feat_num_list = list(range(10,20,5))
     results = defaultdict(dict)
     gt_correspondences = semantic_map.gt_pred_correspondences.copy()
@@ -471,15 +472,30 @@ def main():
     # edges_list = method3(semantic_map,15,0.2)
     # subgraphs = extract_subgraphs(edges_list)
     # true_labels, predicted_labels,instances = extract_labels_from_subgraphs(subgraphs,gt_correspondences)
-    true_labels,predicted_labels = method4(semantic_map,10,"chordal_distance")
-    print(f"ARI Score for method4 {adjusted_rand_score(true_labels, predicted_labels)}")
-    print(f"Homogeneity Score for method4 {homogeneity_score(true_labels, predicted_labels)}")
-    print(f"Completeness Score for method4 {completeness_score(true_labels, predicted_labels)}")
-    print(f"Number of predicted objects: {len(np.unique(predicted_labels))}")
-    print(f"Number of true objects: {len(np.unique(true_labels))}")
-    print(f"Number of total masks:{len(true_labels)}")
+    for feat_num in feat_num_list:
+        for score in scores_list:
+            print(f"Processing: feat_num={feat_num}, score={score}, without partition")
+            true_labels,predicted_labels = method4(semantic_map,feat_num,distance_type="chordal_distance",partition=False,z_threshold=score)
 
-    predicted_labels2,valid_masks = method2(semantic_map,15,"chordal_distance",len(np.unique(true_labels)))
+            results[(feat_num,score)]["ari_score"] = adjusted_rand_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["homogeneity"] = homogeneity_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["completeness"] = completeness_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["predicted_object_num"] = len(np.unique(predicted_labels))
+            results[(feat_num,score)]["true_object_num"] = len(np.unique(true_labels))
+            results[(feat_num,score)]["instances"] = len(true_labels)
+
+            print(f"Processing: feat_num={feat_num}, score={score}, with partition")
+            true_labels,predicted_labels = method4(semantic_map,feat_num,distance_type="chordal_distance",partition=True,z_threshold=score)
+            results[(feat_num,score)]["ari_score2"] = adjusted_rand_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["homogeneity2"] = homogeneity_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["completeness2"] = completeness_score(true_labels, predicted_labels)
+            results[(feat_num,score)]["predicted_object_num2"] = len(np.unique(predicted_labels))
+            results[(feat_num,score)]["true_object_num2"] = len(np.unique(true_labels))
+            results[(feat_num,score)]["instances2"] = len(true_labels)
+    
+    with open('./method4_results.pkl','wb') as f:
+        pickle.dump(results,f)
+    # predicted_labels2,valid_masks = method2(semantic_map,15,"chordal_distance",len(np.unique(true_labels)))
     """
     true_labels2 = []
     for img_id, mask_id in valid_masks:
