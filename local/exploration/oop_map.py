@@ -296,6 +296,45 @@ def calculate_heading_angle_ransac(feats0,feats1,matches,image_width=512, image_
     translation = cam_pose[:3,3]
     rotation = cam_pose[:3,:3]
     return translation, rotation
+
+def average_edge_distance(pose_graph):
+    total_dist = 0.0
+    count = 0
+    for edge in pose_graph.edges:
+        n1 = pose_graph.nodes[edge.i]
+        n2 = pose_graph.nodes[edge.j]
+        dx = n1.x - n2.x
+        dy = n1.y - n2.y
+        dist = np.hypot(dx, dy)
+        total_dist += dist
+        count += 1
+    return total_dist / count if count > 0 else 0.0
+
+def find_candidate_neighbors(pose_graph, max_dist=5.0):
+    cands = []
+    ids = sorted(pose_graph.nodes.keys())
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            n1, n2 = pose_graph.nodes[ids[i]], pose_graph.nodes[ids[j]]
+            if any((e.i == ids[i] and e.j == ids[j]) or (e.j == ids[i] and e.i == ids[j])
+                   for e in pose_graph.edges):
+                continue
+            dx, dy = n1.x - n2.x, n1.y - n2.y
+            if np.hypot(dx, dy) < max_dist:
+                cands.append((ids[i], ids[j]))
+    return cands
+
+def add_new_edges(pose_graph, candidates, edge_creator, lock):
+    for id1, id2 in candidates:
+        with lock:
+            n1, n2 = pose_graph.nodes[id1], pose_graph.nodes[id2]
+        t, R = edge_creator.match_and_estimate(n1, n2)
+        if t is not None:
+            with lock:
+                pose_graph.add_edge(id1, id2, t, R)
+            print(f"[Main] Added new neighbor edge {id1} ↔ {id2}")
+        else:
+            print(f"[Main] No edge for neighbor pair {id1} ↔ {id2}")
     
 class SemanticSegmentationWorker(threading.Thread):
     def __init__(self, queue, pose_graph, lock, precomputed_masks):
@@ -398,7 +437,8 @@ class EdgeCreator(threading.Thread):
         feats1 = node2.keypoints.copy()
         t_ij, R_ij = calculate_heading_angle_ransac(feats0, feats1, matches)
         return t_ij, R_ij
-    
+
+
 def main():
     pose_graph = PoseGraph()
     lock = threading.Lock()
@@ -452,7 +492,21 @@ def main():
         initialize_2d_poses(pose_graph)
         optimize_pose_graph(pose_graph)
         print("Pose graph optimization complete.")
+        avg_dist = average_edge_distance(pose_graph)
+        print(f"[Main] Average distance between connected node pairs: {avg_dist:.2f} meters")
         draw_pose_graph(pose_graph, title="Optimized Pose Graph")
+
+
+        # Search & add neighbor edges
+        cands = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
+        print(f"[Main] Found {len(cands)} neighbor candidates.")
+        add_new_edges(pose_graph, cands, edge_worker, lock)
+
+        # Second optimization
+        optimize_pose_graph(pose_graph)
+        print("Second optimization complete. Final stats:")
+        print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
+        draw_pose_graph(pose_graph, title="Final Pose Graph")
 
     except KeyboardInterrupt:
         print("\n[Main] Shutting down...")
