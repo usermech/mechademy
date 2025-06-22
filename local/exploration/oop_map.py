@@ -12,7 +12,9 @@ import matplotlib.pyplot as plt
 from sinkhorn_matching import compute_sinkhorn,compute_low_cost_mass
 import networkx as nx
 import community
-from collections import defaultdict
+from collections import defaultdict,deque
+from object_projection import wraparound_centroid,ransac_intersection
+import random
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), '..')))
@@ -21,14 +23,33 @@ import MapClass
 # --- Map Object Representation ---
 
 class MapObject:
-    def __init__(self, feature_collection=None, position=None, parent_object=None):
-        # Initialize attributes
-        self._feature_collection = np.array(feature_collection) if feature_collection is not None else np.array([])
-        self.instances = {}  # int -> tuple
-        self.position = position  # (x, y)
-        self.parent_object = parent_object  # Reference to parent object
+    def __init__(self,id_pairs):
+        self.id_pairs = id_pairs  # int -> (node_id, mask_id)
 
-    # --- Property for feature_collection ---
+    def get_id_keys(self):
+        return list(self.id_pairs.keys())
+
+    def get_id_values(self):
+        return list(self.id_pairs.values())
+
+    def remove_id_pair(self, node_id, mask_id):
+        target = (node_id, mask_id)
+        for key, value in list(self.id_pairs.items()):  # Use list to allow safe removal
+            if value == target:
+                del self.id_pairs[key]
+                return True  # Successfully removed
+        return False  # Not found
+
+
+class ChildMapObject(MapObject):
+    def __init__(self, feature_collection=None, position=None, parent_object=None, parent_id = None, id_pairs=None):
+        super().__init__(id_pairs=id_pairs)
+        self._feature_collection = np.array(feature_collection) if feature_collection is not None else np.array([])
+        self.position = position
+        self.parent_object = parent_object  # Should be a MapObject
+        self._parent_id = parent_id
+
+    # Feature collection property
     @property
     def feature_collection(self):
         return self._feature_collection
@@ -39,7 +60,8 @@ class MapObject:
             self._feature_collection = value
         else:
             raise TypeError("feature_collection must be a numpy array")
-        
+
+    # Position property
     @property
     def position(self):
         return self._position
@@ -50,19 +72,19 @@ class MapObject:
             self._position = value
         else:
             raise ValueError("position must be a tuple of two numbers (x, y)")
-        
-    # --- Instance Access Methods ---
-    def get_instance_keys(self):
-        return list(self.instances.keys())
+    @property
+    def parent_id(self):
+        return self._parent_id
 
-    def get_instance_values(self):
-        return list(self.instances.values())
+    @parent_id.setter
+    def parent_id(self, value):
+        self._parent_id = value
 
-    # --- Parent Access Method ---
-    def get_parent_instances(self):
+    # Parent id_pairs access
+    def get_parent_id_pairs(self):
         if self.parent_object and isinstance(self.parent_object, MapObject):
-            return self.parent_object.instances
-        return self.instances
+            return self.parent_object.id_pairs
+        return self.id_pairs
     
 
 # --- Graph Representation ---
@@ -79,6 +101,7 @@ class Node:
         self.keypoints = None
         self.descriptors = None
         self.feature_collections = None  # Dictionary of feature collections indexed by ID
+        self.centroids = None
 
 class Edge:
     def __init__(self, i, j, t_ij, R_ij):
@@ -91,6 +114,8 @@ class PoseGraph:
     def __init__(self):
         self.nodes = {}
         self.edges = []
+        self.objects = []
+        self.extended_objects = []
 
     def add_node(self, id, rgb_image=None):
         if id not in self.nodes:
@@ -156,7 +181,7 @@ def initialize_2d_poses(graph, anchor_id=None):
             initialized.add(neighbor_id)
             queue.append(neighbor_id)
 
-            print(f"Initialized edge: ({current_id}, {neighbor_id}) => Node {neighbor_id} at ({x_new:.2f}, {y_new:.2f}, θ={np.degrees(theta_new):.1f}°)")
+            # print(f"Initialized edge: ({current_id}, {neighbor_id}) => Node {neighbor_id} at ({x_new:.2f}, {y_new:.2f}, θ={np.degrees(theta_new):.1f}°)")
         
         
 def build_residuals_vector(graph, variable_ids):
@@ -242,6 +267,37 @@ def optimize_pose_graph(graph, anchor_id=None):
 
     print("Optimization complete.")
 
+def clean_disconnected_nodes_and_edges(graph: PoseGraph, anchor_id=0):
+    visited = set()
+    queue = deque([anchor_id])
+
+    # Breadth-first search to find all reachable nodes from anchor_id
+    while queue:
+        current = queue.popleft()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        for edge in graph.edges:
+            if edge.i == current and edge.j not in visited:
+                queue.append(edge.j)
+            elif edge.j == current and edge.i not in visited:
+                queue.append(edge.i)
+
+    # Remove unreachable nodes
+    all_node_ids = set(graph.nodes.keys())
+    unreachable = all_node_ids - visited
+    for node_id in unreachable:
+        del graph.nodes[node_id]
+
+    # Remove edges that reference removed nodes
+    original_edge_count = len(graph.edges)
+    graph.edges = [
+        edge for edge in graph.edges
+        if edge.i in visited and edge.j in visited
+    ]
+    removed_edges = original_edge_count - len(graph.edges)
+
 def all_nodes_have_edges(pose_graph):
     node_ids = sorted(pose_graph.nodes.keys())
     connected_nodes = set()
@@ -289,8 +345,8 @@ def get_keypoint_unit_vector(azimuth, elevation):
 
 def calculate_heading_angle_ransac(feats0,feats1,matches,image_width=512, image_height=256):
     mkpts0, mkpts1 = feats0[matches[...,0]], feats1[matches[...,1]]
-    az0, ele0 = convert_pixel_to_angle(mkpts0[:],1024,512)
-    az1, ele1 = convert_pixel_to_angle(mkpts1[:],1024,512)
+    az0, ele0 = convert_pixel_to_angle(mkpts0[:],512,256)
+    az1, ele1 = convert_pixel_to_angle(mkpts1[:],512,256)
     u0 = get_keypoint_unit_vector(az0, ele0)
     u1 = get_keypoint_unit_vector(az1, ele1)
     bearing0 = u0.T
@@ -361,7 +417,7 @@ def detect_high_anomalies_z_score(data: np.ndarray, threshold: float = 3.0) -> n
     return np.where(z_scores > threshold)[0]
 
 
-def extract_subgraphs(edges_list, split_threshold=10, min_size=3):
+def extract_subgraphs(edges_list, split_threshold=30, min_size=3):
     G = nx.Graph()
     G.add_edges_from(edges_list)
 
@@ -385,9 +441,10 @@ def extract_subgraphs(edges_list, split_threshold=10, min_size=3):
             # Louvain partitioning for larger subgraphs
             partition = community.best_partition(sg)
             groups = defaultdict(list)
+
             for node, group_id in partition.items():
                 groups[group_id].append(node)
-
+            print(f"[PostProcessing] Cluster {raw_index} divided into {len(groups)} groups.")
             for nodes in groups.values():
                 if len(nodes) >= min_size:
                     sub = sg.subgraph(nodes).copy()
@@ -402,7 +459,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-def save_clustered_masks(partitioned_subgraphs, precomputed_images, precomputed_masks, output_dir="clustered_masks"):
+def save_clustered_masks(partitioned_subgraphs, pose_graph, precomputed_masks, output_dir="clustered_masks"):
     """
     Save visualizations of masks with outlines for each cluster in separate folders.
 
@@ -420,8 +477,8 @@ def save_clustered_masks(partitioned_subgraphs, precomputed_images, precomputed_
 
         for node_id, mask_id in subgraph:
             # Load image and mask
-            rgb_img = precomputed_images[node_id].copy()
-            mask = precomputed_masks[node_id][mask_id]
+            rgb_img = pose_graph.nodes[node_id].rgb_image.copy()
+            mask = pose_graph.nodes[node_id].semantic_masks[mask_id]
 
             # Dilate mask to find edges
             kernel = np.ones((3, 3), np.uint8)
@@ -456,6 +513,9 @@ class SemanticSegmentationWorker(threading.Thread):
                     node.semantic_masks = self.segment_image(node_id)
                     # print(f"[SegmentationWorker] Node {node_id} segmented.")
 
+                    # Calculate centroids and store angles
+                    node.centroids = self.calculate_centroids(node.semantic_masks)
+
                     # Check if keypoints already exist
                     if node.keypoints is not None:
                         self.feature_collection_queue.put(node_id)
@@ -466,14 +526,26 @@ class SemanticSegmentationWorker(threading.Thread):
     def segment_image(self, node_id):
         # Return precomputed mask if available
         return self.precomputed_masks.get(node_id, {})
+
+    def calculate_centroids(self, semantic_masks):
+        centroids = {}
+        for mask_id, mask in semantic_masks.items():
+            if mask is None or mask.size == 0:
+                continue  # skip empty masks
+
+            centroid = wraparound_centroid(mask)    # (x,y)
+            angle = convert_pixel_to_angle(centroid, mask.shape[1], mask.shape[0])[0]
+            centroids[mask_id] = angle
+        return centroids
     
 class FeatureExtractionWorker(threading.Thread):
-    def __init__(self, queue, pose_graph, lock, feature_collection_queue, device=None):
+    def __init__(self, queue, pose_graph, lock, feature_collection_queue,edge_queue, device=None):
         super().__init__(daemon=True)
         self.queue = queue
         self.pose_graph = pose_graph
         self.lock = lock
         self.feature_collection_queue = feature_collection_queue
+        self.edge_queue = edge_queue
         self._device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.detector = SuperPoint(max_num_keypoints=1024).eval().to(self._device)
 
@@ -494,50 +566,51 @@ class FeatureExtractionWorker(threading.Thread):
                 if node.semantic_masks:
                     self.feature_collection_queue.put(node_id)
                     # print(f"[FeatureExtractionWorker] Node {node_id} pushed to feature collection queue.")
-
+                self.edge_queue.put(node_id)
             self.queue.task_done()
 
 class EdgeCreator(threading.Thread):
-    def __init__(self, pose_graph, lock, check_interval=1.0, window_size=5):
+    def __init__(self, pose_graph, lock, edge_queue, window_size=5):
         super().__init__(daemon=True)
         self.pose_graph = pose_graph
         self.lock = lock
-        self.check_interval = check_interval
+        self.edge_queue = edge_queue
         self.window_size = window_size
-        # Configuration for SuperGlue
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.matcher = LightGlue(features="superpoint").eval().to(self.device)
 
     def run(self):
         while True:
-            time.sleep(self.check_interval)
+            node_id = self.edge_queue.get()
             with self.lock:
                 node_ids = sorted(self.pose_graph.nodes.keys())
-                for idx_current in range(len(node_ids)):
-                    id_current = node_ids[idx_current]
-                    node_current = self.pose_graph.nodes[id_current]
+                idx_current = node_ids.index(node_id)
+                node_current = self.pose_graph.nodes[node_id]
 
-                    if node_current.keypoints is None or node_current.descriptors is None:
+            if node_current.keypoints is None or node_current.descriptors is None:
+                self.edge_queue.task_done()
+                continue
+
+            for offset in range(1, self.window_size + 1):
+                idx_prev = idx_current - offset
+                if idx_prev < 0:
+                    break
+
+                with self.lock:
+                    id_prev = node_ids[idx_prev]
+                    node_prev = self.pose_graph.nodes[id_prev]
+                    if self.edge_exists(node_id, id_prev):
+                        continue
+                    if node_prev.keypoints is None or node_prev.descriptors is None:
                         continue
 
-                    # Search up to `window_size` nodes behind
-                    for offset in range(1, self.window_size + 1):
-                        idx_prev = idx_current - offset
-                        if idx_prev < 0:
-                            break
-                        id_prev = node_ids[idx_prev]
-                        node_prev = self.pose_graph.nodes[id_prev]
+                t_ij, R_ij = self.match_and_estimate(node_current, node_prev)
+                if t_ij is not None and R_ij is not None:
+                    with self.lock:
+                        self.pose_graph.add_edge(node_id, id_prev, t_ij, R_ij)
+                        print(f"[EdgeWorker] Edge added between Node {node_id} and Node {id_prev}")
 
-                        if node_prev.keypoints is None or node_prev.descriptors is None:
-                            continue
-
-                        if self.edge_exists(id_current, id_prev):
-                            continue
-
-                        t_ij, R_ij = self.match_and_estimate(node_current, node_prev)
-                        if t_ij is not None and R_ij is not None:
-                            self.pose_graph.add_edge(id_current, id_prev, t_ij, R_ij)
-                            print(f"[EdgeWorker] Edge added between Node {id_current} and Node {id_prev}")
+            self.edge_queue.task_done()
 
     def edge_exists(self, i, j):
         return any((e.i == i and e.j == j) or (e.i == j and e.j == i) for e in self.pose_graph.edges)
@@ -549,6 +622,7 @@ class EdgeCreator(threading.Thread):
         matches = pred["matches"][0].cpu().numpy()
         if len(matches) < MIN_MATCH_COUNT:
             return None, None
+
         feats0 = node1.keypoints.copy()
         feats1 = node2.keypoints.copy()
         t_ij, R_ij = calculate_heading_angle_ransac(feats0, feats1, matches)
@@ -566,6 +640,8 @@ class FeatureCollectionWorker(threading.Thread):
     def run(self):
         print("[FeatureCollectionWorker] Started.")
         while True:
+            
+
             node_id = self.queue.get()
             with self.lock:
                 if node_id not in self.pose_graph.nodes:
@@ -584,8 +660,9 @@ class FeatureCollectionWorker(threading.Thread):
                 keypoints = np.round(node.keypoints).astype(int)
                 descriptors = node.descriptors
 
-            # Process feature collections locally, not storing in node
-            collections_for_node = []
+            if node.feature_collections is None:
+                node.feature_collections = {}
+
 
             for mask_id, mask in node.semantic_masks.items():
                 valid_mask = (keypoints[:, 1] < mask.shape[0]) & (keypoints[:, 0] < mask.shape[1])
@@ -595,16 +672,16 @@ class FeatureCollectionWorker(threading.Thread):
                 mask_values = mask[valid_points[:, 1], valid_points[:, 0]]
                 keep = mask_values == 1
 
-                if np.sum(keep) < 10:
+                if np.sum(keep) < 15:
                     continue
 
                 collection = valid_desc[keep].copy()
-                collections_for_node.append((mask_id, collection))
+                node.feature_collections[mask_id] = collection
 
-            print(f"[FeatureCollectionWorker] Node {node_id} - {len(collections_for_node)} collections computed.")
+            print(f"[FeatureCollectionWorker] Node {node_id} - {len(node.feature_collections)} collections computed.")
 
             with self.similarity_matrix_lock:
-                for mask_id, new_collection in collections_for_node:
+                for mask_id, new_collection in node.feature_collections.items():
                     new_row = []
 
                     for existing in self.similarity_matrix["collections"]:
@@ -617,149 +694,275 @@ class FeatureCollectionWorker(threading.Thread):
 
                     new_row.append(1.0)
                     self.similarity_matrix["matrix"].append(new_row)
-
-                    self.similarity_matrix["collections"].append(new_collection)
                     self.similarity_matrix["index_mapping"].append((node_id, mask_id))
+                    self.similarity_matrix["collections"].append(new_collection)
 
-                    print(f"[FeatureCollectionWorker] Added (Node {node_id}, Mask {mask_id}) to similarity matrix.")
+                    # print(f"[FeatureCollectionWorker] Added (Node {node_id}, Mask {mask_id}) to similarity matrix.")
 
             self.queue.task_done()
 
+def load_and_prepare_semantic_map(filepath):
+    with open(filepath, "rb") as f:
+        semantic_map = pickle.load(f)
+    print("Semantic map loaded.")
 
+    if not hasattr(semantic_map, "refined_prediction_masks"):
+        print("Refining semantic predictions")
+        semantic_map.refine_semantic_predictions()
+
+    return semantic_map
+
+
+def start_all_workers(pose_graph, lock, precomputed_masks, similarity_matrix, similarity_matrix_lock):
+    seg_queue = Queue()
+    feat_queue = Queue()
+    fc_queue = Queue()
+    edge_queue = Queue()
+
+    seg_worker = SemanticSegmentationWorker(seg_queue, pose_graph, lock, precomputed_masks, fc_queue)
+    feat_worker = FeatureExtractionWorker(feat_queue, pose_graph, lock, fc_queue, edge_queue)
+    edge_worker = EdgeCreator(pose_graph, lock, edge_queue, window_size=5)
+    fc_worker = FeatureCollectionWorker(fc_queue, pose_graph, lock, similarity_matrix_lock, similarity_matrix)
+
+    for worker in [seg_worker, feat_worker, edge_worker, fc_worker]:
+        worker.start()
+
+    print("Workers started.")
+    return seg_queue, feat_queue, fc_queue, edge_queue, edge_worker
+
+    # for worker in [seg_worker, feat_worker, fc_worker]:
+    #     worker.start()
+
+    # print("Workers started.")
+    # return seg_queue, feat_queue, fc_queue, None
+
+def add_images_to_graph(images, pose_graph, lock, seg_queue, feat_queue):
+    for node_id, image in enumerate(images.values()):
+        with lock:
+            pose_graph.add_node(node_id, rgb_image=image)
+        seg_queue.put(node_id)
+        feat_queue.put(node_id)
+        time.sleep(0.1)
+
+
+def wait_for_all_queues(queues):
+    print("[Main] Waiting for segmentation and feature extraction to complete...")
+    for queue in queues:
+        queue.join()
+
+
+def postprocess_similarity_matrix(similarity_matrix):
+    sim_mat_np = np.array(similarity_matrix["matrix"])
+    index_mapping = similarity_matrix["index_mapping"]
+    matched_pairs = []
+
+    for i, row in enumerate(sim_mat_np):
+        high_matches = detect_high_anomalies_z_score(row, threshold=4.0)
+        for j in high_matches:
+            matched_pairs.append((index_mapping[i], index_mapping[j]))
+
+    print(f"[PostProcessing] {len(matched_pairs)} matched feature collection pairs.")
+    return matched_pairs
+
+def compute_row_score(similarity_matrix, row_index, selected_cols):
+    
+    if not selected_cols:
+        return 0.0  # or np.nan, depending on your use case
+    values = similarity_matrix[row_index, selected_cols]
+    return np.sum(values)
+
+def compute_set_scores(similarity_matrix, indices_set):
+
+    scores = {}
+    for idx in indices_set:
+        others = [i for i in indices_set if i != idx]
+        score = compute_row_score(similarity_matrix, idx, others)
+        scores[idx] = score/len(indices_set)
+        sorted_indices = sorted(scores, key=lambda x: scores[x],reverse=True)
+    return sorted_indices
+
+def extract_mutual_matches(P, threshold=0.0):
+    """
+    Extract mutual best matches from Sinkhorn transport matrix P.
+
+    Args:
+        P (np.ndarray): Transport matrix of shape (n0, n1).
+        threshold (float): Minimum transport weight to consider a match.
+
+    Returns:
+        matches (list of tuples): List of (i, j) pairs of matched indices.
+    """
+    # For each vector i in set 0, find best j in set 1
+    best_j_for_i = np.argmax(P, axis=1)
+
+    # For each vector j in set 1, find best i in set 0
+    best_i_for_j = np.argmax(P, axis=0)
+
+    matches = []
+    for i, j in enumerate(best_j_for_i):
+        # Check mutual best match and threshold
+        if best_i_for_j[j] == i and P[i, j] > threshold:
+            matches.append((i, j))
+
+    return matches
+
+def get_merged_feature_collection(similarity_matrix, object_group,epsilon=0.1):
+    feature_collections = similarity_matrix["collections"]
+    sim_mat_np = np.array(similarity_matrix["matrix"])
+    index_mapping = similarity_matrix["index_mapping"]
+    tuple_to_index = {t: i for i, t in enumerate(index_mapping)}
+    indices = [tuple_to_index[t] for t in object_group]
+    sorted_set = compute_set_scores(sim_mat_np,indices)
+    root_node = sorted_set[0]
+    base_collection = list(feature_collections[root_node])
+    for collection_id in sorted_set[1:]:
+        new_collection = list(feature_collections[collection_id])
+        P, C= compute_sinkhorn(base_collection, new_collection)
+        matches = extract_mutual_matches(P)
+        # Get set of indices in the new collection that were matched
+        matched_new_indices = {i_new for _, i_new in matches}
+
+        # Append only unmatched items from the new collection
+        for i, item in enumerate(new_collection):
+            if i not in matched_new_indices:
+                base_collection.append(item)
+
+    base_collection = np.array(base_collection)
+    return base_collection
+
+def cluster_semantic_objects(subs, pose_graph, similarity_matrix, angle_threshold=15):
+    for cluster_index, obj in enumerate(subs):
+        # parent_object = MapObject(dict(enumerate(obj)))
+        # pose_graph.objects.append(parent_object)
+        vectors = []
+        for node_id, mask_id in obj:
+            if node_id not in pose_graph.nodes:
+                continue
+            node = pose_graph.nodes[node_id]
+            mask = node.semantic_masks[mask_id]
+            angle = node.centroids[mask_id] + node.theta
+            direction = np.array([np.cos(angle[0]), np.sin(angle[0])])
+            point = [node.x, node.y]
+            vectors.append((point, direction, (node_id, mask_id)))
+
+        remaining = vectors.copy()
+        while len(remaining) >= 5:
+            ransac_input = [(np.array(p), np.array(d)) for p, d, _ in remaining]
+            intersection, inliers, _ = ransac_intersection(ransac_input, np.radians(angle_threshold), 100)
+            if len(inliers) < 4:
+                break
+
+            inlier_set = set((tuple(p), tuple(d)) for p, d in inliers)
+            group = []
+            next_remaining = []
+            for p, d, mask in remaining:
+                if (tuple(p), tuple(d)) in inlier_set:
+                    group.append(mask)
+                else:
+                    next_remaining.append((p, d, mask))
+            
+            merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
+            pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
+            remaining = next_remaining
+
+    print(f"[PostProcessing] Clustered {len(pose_graph.extended_objects)} directional object groups with {len(pose_graph.objects)} parents.")
+    return pose_graph.extended_objects
+
+
+def optimize_pose_graph_twice(pose_graph, lock, edge_worker):
+    print("Starting pose graph optimization...")
+    initialize_2d_poses(pose_graph)
+    clean_disconnected_nodes_and_edges(pose_graph,anchor_id=list(pose_graph.nodes.keys())[0])
+    optimize_pose_graph(pose_graph)
+    avg_dist = average_edge_distance(pose_graph)
+    print(f"[Main] Average edge distance: {avg_dist:.2f} m")
+    draw_pose_graph(pose_graph, title="Optimized Pose Graph")
+    
+    # candidates = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
+    # print(f"[Main] Found {len(candidates)} neighbor candidates.")
+    # add_new_edges(pose_graph, candidates, edge_worker, lock)
+
+    # optimize_pose_graph(pose_graph)
+    # print("Second optimization complete.")
+    # draw_pose_graph(pose_graph, title="Final Pose Graph")
 
 def main():
     pose_graph = PoseGraph()
     lock = threading.Lock()
-
-    with open("semantic_map_mechatronics4.pkl", "rb") as f:
-        semantic_map = pickle.load(f)
-
-    print("Semantic map loaded.")
-    if not hasattr(semantic_map,"refinde_prediction_masks"):
-        print("Refining semantic predictions")
-        semantic_map.refine_semantic_predictions()
-    precomputed_masks = semantic_map.refined_prediction_masks
-    precomputed_images = semantic_map.rgb_observations
-
-    # Queues
-    seg_queue = Queue()
-    feat_queue = Queue()
-    feature_collection_queue = Queue()
-
-    # Shared similarity matrix and its lock
+    semantic_map = load_and_prepare_semantic_map("../semantic_map_00800-TEEsavR23oF-random.pkl")
+    masks = semantic_map.refined_prediction_masks
+    images =  semantic_map.rgb_observations
+    # with open('path.pkl','rb') as f:
+    #     key_order = pickle.load(f)
+    # ordered_images = {k: images[k] for k in key_order if k in images}
+    # ordered_masks = {i: masks[k] for i,k in enumerate(key_order) if k in masks}
+    # images = ordered_images
+    # masks = ordered_masks
     similarity_matrix = {
-        "matrix": [],            # 2D list (will become 2D numpy array if converted)
-        "collections": [],       # List of feature collections
-        "index_mapping": []      # List of (node_id, mask_id) tuples
+        "matrix": [],
+        "collections": [],
+        "index_mapping": []
     }
     similarity_matrix_lock = threading.Lock()
 
-    # Start worker threads
-    seg_worker = SemanticSegmentationWorker(
-        queue=seg_queue,
-        pose_graph=pose_graph,
-        lock=lock,
-        precomputed_masks=precomputed_masks,
-        feature_collection_queue=feature_collection_queue
+    seg_q, feat_q, fc_q, edge_q, edge_worker = start_all_workers(
+        pose_graph, lock, masks, similarity_matrix, similarity_matrix_lock
     )
 
-    feat_worker = FeatureExtractionWorker(
-        queue=feat_queue,
-        pose_graph=pose_graph,
-        lock=lock,
-        feature_collection_queue=feature_collection_queue
-    )
+    add_images_to_graph(images, pose_graph, lock, seg_q, feat_q)
+    wait_for_all_queues([seg_q, feat_q, fc_q, edge_q])
 
-    edge_worker = EdgeCreator(
-        pose_graph=pose_graph,
-        lock=lock,
-        window_size=5  # Optional: change the number of past nodes to connect
-    )
+    # while not all_nodes_have_edges(pose_graph):
+    #     time.sleep(0.5)
 
-    fc_worker = FeatureCollectionWorker(
-        queue=feature_collection_queue,
-        pose_graph=pose_graph,
-        lock=lock,
-        similarity_matrix_lock=similarity_matrix_lock,
-        similarity_matrix=similarity_matrix
-    )
+    with lock:
+        print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
+    with open('similarity_matrix.pkl','wb') as f:
+        pickle.dump(similarity_matrix,f)
+    matched_pairs = postprocess_similarity_matrix(similarity_matrix)
 
-    seg_worker.start()
-    feat_worker.start()
-    edge_worker.start()
-    fc_worker.start()
-
-    print("Workers started.")
-    id_counter = 0
-
-    try:
-        for image in precomputed_images.values():
-            with lock:
-                pose_graph.add_node(id_counter, rgb_image=image)
-            seg_queue.put(id_counter)
-            feat_queue.put(id_counter)
-            # print(f"[Main] Registered Node {id_counter}")
-            id_counter += 1
-            time.sleep(0.1)
-
-        print("[Main] Waiting for segmentation and feature extraction to complete...")
- 
-        # Wait until all queues are empty
-        seg_queue.join()
-        feat_queue.join()
-        feature_collection_queue.join()
-
-        # while not all_nodes_have_edges(pose_graph):
-        #     time.sleep(0.5)
-
-        with lock:
-            print(f"There are {len(pose_graph.nodes)} nodes in the graph.")
-            print(f"There are {len(pose_graph.edges)} edges in the graph.")
-        
-        sim_mat_np = np.array(similarity_matrix["matrix"])
-        print(f"The total number of feature clusters is {sim_mat_np.shape[0]}")
-        index_mapping = similarity_matrix["index_mapping"]
-
-        matched_pairs = []
-        for i in range(len(sim_mat_np)):
-            row = sim_mat_np[i, :]
-            high_matches = detect_high_anomalies_z_score(row, threshold=4.0)
-            for j in high_matches:
-                matched_pairs.append((index_mapping[i], index_mapping[j]))
-        print(f"[PostProcessing] {len(matched_pairs)} matched feature collection pairs.")
-
-        raw_subs, part_subs, adj_mat, origins = extract_subgraphs(edges_list=matched_pairs,
+    raw_subs, part_subs, _, origins = extract_subgraphs(
+        edges_list=matched_pairs,
         split_threshold=30,
         min_size=3
-        )
-        
-        print(f"[PostProcessing] Found {len(raw_subs)} raw subgraphs.")
-        print(f"[PostProcessing] Partitioned into {len(part_subs)} final subgraphs.")
+    )
+    
+    # np.save('origins.npy',origins)
+    print(f"[PostProcessing] Found {len(raw_subs)} raw subgraphs, partitioned into {len(part_subs)}.")
+    with open('pose_graph_simulation_random_before.pkl','wb') as f:
+        pickle.dump(pose_graph,f)
+    optimize_pose_graph_twice(pose_graph, lock, edge_worker)
+    
+    ### LOAD THE POSE GRAPH OBJECT
+    # with open('pose_graph.pkl','rb') as f:
+    #     pose_graph = pickle.load(f)
 
-
-        # save_clustered_masks(raw_subs, precomputed_images, precomputed_masks)
-
-        print("Starting pose graph optimization...")
-        initialize_2d_poses(pose_graph)
-        optimize_pose_graph(pose_graph)
-        print("Pose graph optimization complete.")
-        avg_dist = average_edge_distance(pose_graph)
-        print(f"[Main] Average distance between connected node pairs: {avg_dist:.2f} meters")
-        draw_pose_graph(pose_graph, title="Optimized Pose Graph")
-
-
-        # Search & add neighbor edges
-        cands = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
-        print(f"[Main] Found {len(cands)} neighbor candidates.")
-        add_new_edges(pose_graph, cands, edge_worker, lock)
-
-        # Second optimization
-        optimize_pose_graph(pose_graph)
-        print("Second optimization complete. Final stats:")
-        print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
-        draw_pose_graph(pose_graph, title="Final Pose Graph")
-
-    except KeyboardInterrupt:
-        print("\n[Main] Shutting down...")
+    pose_graph.objects.clear()
+    pose_graph.extended_objects.clear()
+    print(f"[LOADER] {pose_graph.objects} and {pose_graph.extended_objects}")
+    for obj in raw_subs:
+        parent_object = MapObject(dict(enumerate(obj)))
+        pose_graph.objects.append(parent_object)
+    objects = cluster_semantic_objects(part_subs, pose_graph, similarity_matrix, angle_threshold=15)
+    print(f"[Main] Finished with {len(objects)} detected objects.")
+    
+    plt.figure(figsize=(8, 8))
+    for node_id, node in pose_graph.nodes.items():
+        if node.x is not None and node.y is not None:
+            plt.plot(-node.x, node.y, 'ro')
+            # plt.text(node.x + 0.02, node.y + 0.02, str(node_id), fontsize=8)
+    for object_instance in objects:
+        x,y = -object_instance.position[0],object_instance.position[1]
+        if np.abs(x)<10 and np.abs(y)<10:
+            plt.plot(x, y, 'go')
+            plt.text(x + 0.02, y + 0.02, str(object_instance.parent_id), fontsize=8)
+    plt.axis('equal')
+    plt.xlabel("X (m)")
+    plt.ylabel("Y (m)")
+    plt.show()
+    # ### SAVE THE POSE GRAPH OBJECT
+    with open('pose_graph_simulation_random.pkl','wb') as f:
+        pickle.dump(pose_graph,f)
+    # save_clustered_masks(raw_subs, pose_graph, masks)
 if __name__ == "__main__":
     main()
