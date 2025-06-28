@@ -345,8 +345,9 @@ def get_keypoint_unit_vector(azimuth, elevation):
 
 def calculate_heading_angle_ransac(feats0,feats1,matches,image_width=512, image_height=256):
     mkpts0, mkpts1 = feats0[matches[...,0]], feats1[matches[...,1]]
-    az0, ele0 = convert_pixel_to_angle(mkpts0[:],512,256)
-    az1, ele1 = convert_pixel_to_angle(mkpts1[:],512,256)
+    first_n_keypoints = 100
+    az0, ele0 = convert_pixel_to_angle(mkpts0[:first_n_keypoints],1024,512)
+    az1, ele1 = convert_pixel_to_angle(mkpts1[:first_n_keypoints],1024,512)
     u0 = get_keypoint_unit_vector(az0, ele0)
     u1 = get_keypoint_unit_vector(az1, ele1)
     bearing0 = u0.T
@@ -672,7 +673,7 @@ class FeatureCollectionWorker(threading.Thread):
                 mask_values = mask[valid_points[:, 1], valid_points[:, 0]]
                 keep = mask_values == 1
 
-                if np.sum(keep) < 15:
+                if np.sum(keep) < 10:
                     continue
 
                 collection = valid_desc[keep].copy()
@@ -832,38 +833,51 @@ def get_merged_feature_collection(similarity_matrix, object_group,epsilon=0.1):
 
 def cluster_semantic_objects(subs, pose_graph, similarity_matrix, angle_threshold=15):
     for cluster_index, obj in enumerate(subs):
-        # parent_object = MapObject(dict(enumerate(obj)))
-        # pose_graph.objects.append(parent_object)
-        vectors = []
-        for node_id, mask_id in obj:
-            if node_id not in pose_graph.nodes:
-                continue
-            node = pose_graph.nodes[node_id]
-            mask = node.semantic_masks[mask_id]
-            angle = node.centroids[mask_id] + node.theta
-            direction = np.array([np.cos(angle[0]), np.sin(angle[0])])
-            point = [node.x, node.y]
-            vectors.append((point, direction, (node_id, mask_id)))
+        # # parent_object = MapObject(dict(enumerate(obj)))
+        # # pose_graph.objects.append(parent_object)
+        # vectors = []
+        # for node_id, mask_id in obj:
+        #     if node_id not in pose_graph.nodes:
+        #         continue
+        #     node = pose_graph.nodes[node_id]
+        #     mask = node.semantic_masks[mask_id]
+        #     angle = node.centroids[mask_id] + node.theta
+        #     direction = np.array([np.cos(angle[0]), np.sin(angle[0])])
+        #     point = [node.x, node.y]
+        #     vectors.append((point, direction, (node_id, mask_id)))
 
-        remaining = vectors.copy()
-        while len(remaining) >= 5:
-            ransac_input = [(np.array(p), np.array(d)) for p, d, _ in remaining]
-            intersection, inliers, _ = ransac_intersection(ransac_input, np.radians(angle_threshold), 100)
-            if len(inliers) < 4:
-                break
+        # remaining = vectors.copy()
+        # while len(remaining) >= 5:
+        #     ransac_input = [(np.array(p), np.array(d)) for p, d, _ in remaining]
+        #     intersection, inliers, _ = ransac_intersection(ransac_input, np.radians(angle_threshold), 100)
+        #     if len(inliers) < 4:
+        #         break
 
-            inlier_set = set((tuple(p), tuple(d)) for p, d in inliers)
-            group = []
-            next_remaining = []
-            for p, d, mask in remaining:
-                if (tuple(p), tuple(d)) in inlier_set:
-                    group.append(mask)
-                else:
-                    next_remaining.append((p, d, mask))
+        #     inlier_set = set((tuple(p), tuple(d)) for p, d in inliers)
+        #     group = []
+        #     next_remaining = []
+        #     for p, d, mask in remaining:
+        #         if (tuple(p), tuple(d)) in inlier_set:
+        #             group.append(mask)
+        #         else:
+        #             next_remaining.append((p, d, mask))
             
-            merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
-            pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
-            remaining = next_remaining
+        #     merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
+        #     pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
+        #     remaining = next_remaining
+        group = []
+        for node_id, mask_id in obj:
+            node = pose_graph.nodes[node_id]
+            angle = node.centroids[mask_id] + node.theta
+            try:
+                intersection = node.x + np.cos(angle[0])*0.8, node.y + np.sin(angle[0])*0.8
+                print(intersection)
+            except:
+                intersection = (0,0)
+            group.append((node_id, mask_id))
+
+        merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
+        pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
 
     print(f"[PostProcessing] Clustered {len(pose_graph.extended_objects)} directional object groups with {len(pose_graph.objects)} parents.")
     return pose_graph.extended_objects
@@ -878,20 +892,27 @@ def optimize_pose_graph_twice(pose_graph, lock, edge_worker):
     print(f"[Main] Average edge distance: {avg_dist:.2f} m")
     draw_pose_graph(pose_graph, title="Optimized Pose Graph")
     
-    # candidates = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
-    # print(f"[Main] Found {len(candidates)} neighbor candidates.")
-    # add_new_edges(pose_graph, candidates, edge_worker, lock)
+    candidates = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
+    print(f"[Main] Found {len(candidates)} neighbor candidates.")
+    add_new_edges(pose_graph, candidates, edge_worker, lock)
 
-    # optimize_pose_graph(pose_graph)
-    # print("Second optimization complete.")
-    # draw_pose_graph(pose_graph, title="Final Pose Graph")
+    optimize_pose_graph(pose_graph)
+    print("Second optimization complete.")
+    draw_pose_graph(pose_graph, title="Final Pose Graph")
 
 def main():
     pose_graph = PoseGraph()
     lock = threading.Lock()
-    semantic_map = load_and_prepare_semantic_map("../semantic_map_00800-TEEsavR23oF-random.pkl")
+    semantic_map = load_and_prepare_semantic_map("./semantic_map_mechatronics_loop.pkl")
     masks = semantic_map.refined_prediction_masks
     images =  semantic_map.rgb_observations
+
+    # from itertools import islice
+
+    # # Copy first 30 items from masks and images
+    # masks = dict(islice(masks.items(), 10))
+    # images = dict(islice(images.items(), 10))
+
     # with open('path.pkl','rb') as f:
     #     key_order = pickle.load(f)
     # ordered_images = {k: images[k] for k in key_order if k in images}
@@ -912,12 +933,10 @@ def main():
     add_images_to_graph(images, pose_graph, lock, seg_q, feat_q)
     wait_for_all_queues([seg_q, feat_q, fc_q, edge_q])
 
-    # while not all_nodes_have_edges(pose_graph):
-    #     time.sleep(0.5)
-
     with lock:
         print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
-    with open('similarity_matrix.pkl','wb') as f:
+
+    with open('similarity_matrix_mechatronics_loop.pkl','wb') as f:
         pickle.dump(similarity_matrix,f)
     matched_pairs = postprocess_similarity_matrix(similarity_matrix)
 
@@ -929,9 +948,14 @@ def main():
     
     # np.save('origins.npy',origins)
     print(f"[PostProcessing] Found {len(raw_subs)} raw subgraphs, partitioned into {len(part_subs)}.")
-    with open('pose_graph_simulation_random_before.pkl','wb') as f:
-        pickle.dump(pose_graph,f)
+
     optimize_pose_graph_twice(pose_graph, lock, edge_worker)
+
+    # for node in pose_graph.nodes.values():
+    #     del node.features
+    #     del node.descriptors
+    #     if hasattr(node, 'keypoints') and isinstance(node.keypoints, torch.Tensor):
+    #         node.keypoints = node.keypoints.cpu()
     
     ### LOAD THE POSE GRAPH OBJECT
     # with open('pose_graph.pkl','rb') as f:
@@ -953,16 +977,16 @@ def main():
             # plt.text(node.x + 0.02, node.y + 0.02, str(node_id), fontsize=8)
     for object_instance in objects:
         x,y = -object_instance.position[0],object_instance.position[1]
-        if np.abs(x)<10 and np.abs(y)<10:
-            plt.plot(x, y, 'go')
-            plt.text(x + 0.02, y + 0.02, str(object_instance.parent_id), fontsize=8)
+        plt.plot(x, y, 'go')
+        plt.text(x + 0.02, y + 0.02, str(object_instance.parent_id), fontsize=8)
+        
     plt.axis('equal')
     plt.xlabel("X (m)")
     plt.ylabel("Y (m)")
     plt.show()
     # ### SAVE THE POSE GRAPH OBJECT
-    with open('pose_graph_simulation_random.pkl','wb') as f:
+    with open('pose_graph_mechatronics_loop.pkl','wb') as f:
         pickle.dump(pose_graph,f)
-    # save_clustered_masks(raw_subs, pose_graph, masks)
+    save_clustered_masks(part_subs, pose_graph, masks)
 if __name__ == "__main__":
     main()
