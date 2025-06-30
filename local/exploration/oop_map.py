@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 from scipy.optimize import least_squares
 import threading
 from queue import Queue
@@ -465,10 +466,6 @@ def extract_subgraphs(edges_list, split_threshold=30, min_size=3):
 
     return raw_subgraphs, partitioned_subgraphs, adj_matrices, subgraph_origins
 
-import os
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
 
 def save_clustered_masks(partitioned_subgraphs, pose_graph, precomputed_masks, output_dir="clustered_masks"):
     """
