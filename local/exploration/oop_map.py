@@ -29,7 +29,7 @@ from detectron2.projects.deeplab import add_deeplab_config
 from demo.defaults import DefaultPredictor
 from oneformer import (
     add_oneformer_config, add_common_config,
-    add_swin_config, add_dinat_config, add_convnext_config
+    add_swin_config, add_dinat_config, add_convnext_config)
 
 # --- Map Object Representation ---
 
@@ -599,11 +599,12 @@ class SemanticSegmentationWorker(threading.Thread):
         {segment_id: np.bool_ mask}
         """
         panoptic_seg, segments_info = self._infer_image(node.rgb_image, task="panoptic")
-        pan_np = panoptic_seg.to(self.cpu_device).numpy()
+        mask = panoptic_seg.to(self.cpu_device).numpy()
 
         masks = {}
-        height, width = pan_np.shape
+        height, width = mask.shape
         label_idx = 0
+        area_threshold = 100
         for seg_info in segments_info:
             label = seg_info["id"]
             category = seg_info["category_id"]
