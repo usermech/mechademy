@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from sinkhorn_matching import compute_sinkhorn,compute_low_cost_mass
 import networkx as nx
 import community
+from itertools import combinations
 from collections import defaultdict,deque
 from object_projection import wraparound_centroid,ransac_intersection
 import random
@@ -19,6 +20,15 @@ import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), '..')))
 import MapClass
+
+### ONEFORMER IMPORTS
+from detectron2.config import get_cfg
+from detectron2.data import MetadataCatalog
+from detectron2.projects.deeplab import add_deeplab_config
+from demo.defaults import DefaultPredictor
+from oneformer import (
+    add_oneformer_config, add_common_config,
+    add_swin_config, add_dinat_config, add_convnext_config
 
 # --- Map Object Representation ---
 
@@ -497,46 +507,154 @@ def save_clustered_masks(partitioned_subgraphs, pose_graph, precomputed_masks, o
 
 
 class SemanticSegmentationWorker(threading.Thread):
-    def __init__(self, queue, pose_graph, lock, precomputed_masks, feature_collection_queue):
-        super().__init__(daemon=True)
+    SWIN_CFG_DICT = {
+        "cityscapes": "configs/cityscapes/oneformer_swin_large_IN21k_384_bs16_90k.yaml",
+        "coco":       "configs/coco/oneformer_swin_large_IN21k_384_bs16_100ep.yaml",
+        "ade20k":     "configs/ade20k/oneformer_swin_large_IN21k_384_bs16_160k.yaml",
+    }
+    DINAT_CFG_DICT = {
+        "cityscapes": "configs/cityscapes/oneformer_dinat_large_bs16_90k.yaml",
+        "coco":       "configs/coco/oneformer_dinat_large_bs16_100ep.yaml",
+        "ade20k":     "configs/ade20k/dinat/oneformer_dinat_large_bs16_160k.yaml",
+    }
+
+    def __init__(
+        self,
+        queue,
+        pose_graph,
+        lock,
+        feature_collection_queue,
+        *,
+        dataset: str,
+        model_path: str,
+        use_swin: bool = False,
+        device: str = "cuda",          
+        repo_root: str = "/home/romer/umut/segmentation/OneFormer",  # path to config files
+    ):
+        super().__init__(daemon=True)          
         self.queue = queue
         self.pose_graph = pose_graph
         self.lock = lock
-        self.precomputed_masks = precomputed_masks
         self.feature_collection_queue = feature_collection_queue
+        self.dataset = dataset
+        self.model_path = model_path
+        self.use_swin = use_swin
+        self.device_str = device
+        self.repo_root = repo_root
+
+        self._build_predictor()
+        self.cpu_device = torch.device("cpu")
+
+    def _build_predictor(self):
+        cfg = get_cfg()
+        add_deeplab_config(cfg)
+        add_common_config(cfg)
+        add_swin_config(cfg)
+        add_dinat_config(cfg)
+        add_convnext_config(cfg)
+        add_oneformer_config(cfg)
+
+        cfg_path = (
+            self.SWIN_CFG_DICT[self.dataset]
+            if self.use_swin else
+            self.DINAT_CFG_DICT[self.dataset]
+        )
+        cfg.merge_from_file(os.path.join(self.repo_root, cfg_path))
+        cfg.MODEL.DEVICE  = self.device_str
+        cfg.MODEL.WEIGHTS = self.model_path
+        cfg.freeze()
+
+        self.predictor = DefaultPredictor(cfg)
+        self.metadata  = MetadataCatalog.get(
+            cfg.DATASETS.TEST_PANOPTIC[0]
+            if len(cfg.DATASETS.TEST_PANOPTIC) else "__unused"
+        )
+
+        if 'cityscapes_fine_sem_seg_val' in cfg.DATASETS.TEST_PANOPTIC[0]:
+            from cityscapesscripts.helpers.labels import labels
+            stuff_colors = [lab.color for lab in labels if lab.trainId != 255]
+            self.metadata = self.metadata.set(stuff_colors=stuff_colors)
 
     def run(self):
         while True:
             node_id = self.queue.get()
-            with self.lock:
-                if node_id in self.pose_graph.nodes:
+            try:
+                with self.lock:
+                    if node_id not in self.pose_graph.nodes:
+                        continue
                     node = self.pose_graph.nodes[node_id]
-                    node.semantic_masks = self.segment_image(node_id)
-                    # print(f"[SegmentationWorker] Node {node_id} segmented.")
+                    node.semantic_masks = self._segment_image(node)                    
+                    print(f"[SegmentationWorker] Node {node_id} segmented into {len(node.semantic_masks)}.")
 
                     # Calculate centroids and store angles
-                    node.centroids = self.calculate_centroids(node.semantic_masks)
+                    node.centroids = self._calculate_centroids(node.semantic_masks)
 
                     # Check if keypoints already exist
                     if node.keypoints is not None:
                         self.feature_collection_queue.put(node_id)
                         # print(f"[SegmentationWorker] Node {node_id} pushed to feature collection queue.")
+            finally:
+                self.queue.task_done()
 
-            self.queue.task_done()
+    def _segment_image(self, node):
+        """
+        Uses OneFormer to get panoptic mask and converts it into
+        {segment_id: np.bool_ mask}
+        """
+        panoptic_seg, segments_info = self._infer_image(node.rgb_image, task="panoptic")
+        pan_np = panoptic_seg.to(self.cpu_device).numpy()
 
-    def segment_image(self, node_id):
-        # Return precomputed mask if available
-        return self.precomputed_masks.get(node_id, {})
+        masks = {}
+        height, width = pan_np.shape
+        label_idx = 0
+        for seg_info in segments_info:
+            label = seg_info["id"]
+            category = seg_info["category_id"]
+            if category in [0, 2, 3, 5, 8, 11, 12, 13, 27]:
+                continue
+            binary_mask = (mask==label).astype(np.uint8)
+            # Apply morphological operations to refine the mask
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
-    def calculate_centroids(self, semantic_masks):
+            num_labels, labeled_mask = cv2.connectedComponents(binary_mask, connectivity=8)
+
+            for row in range(height):
+                left_pixel_label = labeled_mask[row, 0]
+                right_pixel_label = labeled_mask[row, width - 1]
+
+                if left_pixel_label != right_pixel_label and left_pixel_label != 0 and right_pixel_label != 0:
+                    labeled_mask[labeled_mask == right_pixel_label] = left_pixel_label
+            
+            for i in range(1, num_labels):
+                if np.sum(labeled_mask == i) < area_threshold:
+                    continue
+                # Create a new mask for each label
+                refined_mask = np.zeros_like(binary_mask)
+                refined_mask[labeled_mask == i] = 1
+                # Initialize the dictionary for this index if not already done
+                masks[label_idx] = refined_mask
+                label_idx += 1
+        ### HERE COMES THE MASK REFINEMENT
+        return masks
+    
+    def _infer_image(self, img, task="semantic"):
+        """Light wrapper around DefaultPredictor."""
+        pred = self.predictor(img, task)
+        panoptic_seg, segments_info = pred["panoptic_seg"]
+        torch.cuda.empty_cache()
+        return panoptic_seg, segments_info
+
+    def _calculate_centroids(self, masks):
         centroids = {}
-        for mask_id, mask in semantic_masks.items():
+        for sid, mask in masks.items():
             if mask is None or mask.size == 0:
-                continue  # skip empty masks
-
-            centroid = wraparound_centroid(mask)    # (x,y)
-            angle = convert_pixel_to_angle(centroid, mask.shape[1], mask.shape[0])[0]
-            centroids[mask_id] = angle
+                continue
+            xy = wraparound_centroid(mask)   # (x, y)
+            angle, *_ = convert_pixel_to_angle(
+                xy, mask.shape[1], mask.shape[0]
+            )
+            centroids[sid] = angle
         return centroids
     
 class FeatureExtractionWorker(threading.Thread):
@@ -581,37 +699,79 @@ class EdgeCreator(threading.Thread):
         self.matcher = LightGlue(features="superpoint").eval().to(self.device)
 
     def run(self):
-        while True:
-            node_id = self.edge_queue.get()
-            with self.lock:
-                node_ids = sorted(self.pose_graph.nodes.keys())
+        for item in iter(self.edge_queue.get, None):  
+            try:
+                if isinstance(item, int):
+                    self._process_new_node(item)  
+                elif isinstance(item, tuple) and len(item) == 2:
+                    self._process_pair(*item)
+            finally:
+                self.edge_queue.task_done()          
+
+        self.edge_queue.task_done()
+
+    # ────────────────────────────────────────────────────────────
+    # 1. Sliding-window logic 
+    # ────────────────────────────────────────────────────────────
+    def _process_new_node(self, node_id):
+        with self.lock:
+            node_ids = sorted(self.pose_graph.nodes.keys())
+            try:
                 idx_current = node_ids.index(node_id)
-                node_current = self.pose_graph.nodes[node_id]
+            except ValueError:                      
+                return
+            node_current = self.pose_graph.nodes[node_id]
 
-            if node_current.keypoints is None or node_current.descriptors is None:
-                self.edge_queue.task_done()
-                continue
+        if node_current.keypoints is None or node_current.descriptors is None:
+            return
 
-            for offset in range(1, self.window_size + 1):
-                idx_prev = idx_current - offset
-                if idx_prev < 0:
-                    break
+        for offset in range(1, self.window_size + 1):
+            idx_prev = idx_current - offset
+            if idx_prev < 0:
+                break
 
+            with self.lock:
+                id_prev = node_ids[idx_prev]
+                node_prev = self.pose_graph.nodes[id_prev]
+
+                if self.edge_exists(node_id, id_prev):
+                    continue
+                if (node_prev.keypoints is None or
+                        node_prev.descriptors is None):
+                    continue
+
+            t_ij, R_ij = self.match_and_estimate(node_current, node_prev)
+            if t_ij is not None and R_ij is not None:
                 with self.lock:
-                    id_prev = node_ids[idx_prev]
-                    node_prev = self.pose_graph.nodes[id_prev]
-                    if self.edge_exists(node_id, id_prev):
-                        continue
-                    if node_prev.keypoints is None or node_prev.descriptors is None:
-                        continue
+                    self.pose_graph.add_edge(node_id, id_prev, t_ij, R_ij)
+                    print(f"[EdgeWorker] edge {node_id} ↔ {id_prev} added")
 
-                t_ij, R_ij = self.match_and_estimate(node_current, node_prev)
-                if t_ij is not None and R_ij is not None:
-                    with self.lock:
-                        self.pose_graph.add_edge(node_id, id_prev, t_ij, R_ij)
-                        print(f"[EdgeWorker] Edge added between Node {node_id} and Node {id_prev}")
+    # ────────────────────────────────────────────────────────────
+    # 2. Pair logic
+    # ────────────────────────────────────────────────────────────
+    def _process_pair(self, i, j):
+        if i > j:
+            i, j = j, i
 
-            self.edge_queue.task_done()
+        with self.lock:
+            try:
+                node_i = self.pose_graph.nodes[i]
+                node_j = self.pose_graph.nodes[j]
+            except KeyError:
+                return
+
+            if self.edge_exists(i, j):
+                return
+            if (node_i.keypoints is None or node_i.descriptors is None or
+                    node_j.keypoints is None or node_j.descriptors is None):
+                return
+
+        t_ij, R_ij = self.match_and_estimate(node_i, node_j)
+        if t_ij is not None and R_ij is not None:
+            with self.lock:
+                self.pose_graph.add_edge(i, j, t_ij, R_ij)
+                print(f"[EdgeWorker] edge {i} ↔ {j} added from loop closure")
+
 
     def edge_exists(self, i, j):
         return any((e.i == i and e.j == j) or (e.i == j and e.j == i) for e in self.pose_graph.edges)
@@ -720,7 +880,16 @@ def start_all_workers(pose_graph, lock, precomputed_masks, similarity_matrix, si
     fc_queue = Queue()
     edge_queue = Queue()
 
-    seg_worker = SemanticSegmentationWorker(seg_queue, pose_graph, lock, precomputed_masks, fc_queue)
+    seg_worker = SemanticSegmentationWorker(
+    queue=seg_queue,
+    pose_graph=pose_graph,
+    lock=lock,
+    feature_collection_queue=feat_queue,
+    dataset="ade20k",
+    model_path="/home/romer/umut/segmentation/OneFormer/250_16_dinat_l_oneformer_ade20k_160k.pth",
+    use_swin=False,              # or True for Swin
+    device="cuda"               # "cpu" if no GPU
+    )
     feat_worker = FeatureExtractionWorker(feat_queue, pose_graph, lock, fc_queue, edge_queue)
     edge_worker = EdgeCreator(pose_graph, lock, edge_queue, window_size=5)
     fc_worker = FeatureCollectionWorker(fc_queue, pose_graph, lock, similarity_matrix_lock, similarity_matrix)
@@ -832,7 +1001,7 @@ def get_merged_feature_collection(similarity_matrix, object_group,epsilon=0.1):
     return base_collection
 
 def cluster_semantic_objects(subs, pose_graph, similarity_matrix, angle_threshold=15):
-    for cluster_index, obj in enumerate(subs):
+    for cluster_index, group in enumerate(subs):
         # # parent_object = MapObject(dict(enumerate(obj)))
         # # pose_graph.objects.append(parent_object)
         # vectors = []
@@ -865,19 +1034,10 @@ def cluster_semantic_objects(subs, pose_graph, similarity_matrix, angle_threshol
         #     merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
         #     pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
         #     remaining = next_remaining
-        group = []
-        for node_id, mask_id in obj:
-            node = pose_graph.nodes[node_id]
-            angle = node.centroids[mask_id] + node.theta
-            try:
-                intersection = node.x + np.cos(angle[0])*0.8, node.y + np.sin(angle[0])*0.8
-                print(intersection)
-            except:
-                intersection = (0,0)
-            group.append((node_id, mask_id))
+        
 
         merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
-        pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
+        pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=(0,0),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
 
     print(f"[PostProcessing] Clustered {len(pose_graph.extended_objects)} directional object groups with {len(pose_graph.objects)} parents.")
     return pose_graph.extended_objects
@@ -892,13 +1052,13 @@ def optimize_pose_graph_twice(pose_graph, lock, edge_worker):
     print(f"[Main] Average edge distance: {avg_dist:.2f} m")
     draw_pose_graph(pose_graph, title="Optimized Pose Graph")
     
-    candidates = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
-    print(f"[Main] Found {len(candidates)} neighbor candidates.")
-    add_new_edges(pose_graph, candidates, edge_worker, lock)
+    # candidates = find_candidate_neighbors(pose_graph, max_dist=avg_dist)
+    # print(f"[Main] Found {len(candidates)} neighbor candidates.")
+    # add_new_edges(pose_graph, candidates, edge_worker, lock)
 
-    optimize_pose_graph(pose_graph)
-    print("Second optimization complete.")
-    draw_pose_graph(pose_graph, title="Final Pose Graph")
+    # optimize_pose_graph(pose_graph)
+    # print("Second optimization complete.")
+    # draw_pose_graph(pose_graph, title="Final Pose Graph")
 
 def main():
     pose_graph = PoseGraph()
@@ -931,10 +1091,7 @@ def main():
     )
 
     add_images_to_graph(images, pose_graph, lock, seg_q, feat_q)
-    wait_for_all_queues([seg_q, feat_q, fc_q, edge_q])
-
-    with lock:
-        print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
+    wait_for_all_queues([seg_q, feat_q, fc_q])
 
     with open('similarity_matrix_mechatronics_loop.pkl','wb') as f:
         pickle.dump(similarity_matrix,f)
@@ -945,6 +1102,34 @@ def main():
         split_threshold=30,
         min_size=3
     )
+    
+    pose_graph.objects.clear()
+    pose_graph.extended_objects.clear()
+    for obj in raw_subs:
+        parent_object = MapObject(dict(enumerate(obj)))
+        pose_graph.objects.append(parent_object)
+    objects = cluster_semantic_objects(part_subs, pose_graph, similarity_matrix, angle_threshold=15)
+    # print(f"[LOADER] {pose_graph.objects} and {pose_graph.extended_objects}")
+
+    # def enqueue_loop_closures(self):
+    # """Find long-range node pairs & push them to edge_queue."""
+    # very naive example: brute-force pairwise scan with a feature
+    # similarity threshold.  Replace with your own loop-closure logic.
+    for map_object in pose_graph.extended_objects:
+        nodes = list(map(lambda x: x[0], map_object.id_pairs.values()))
+
+        for id_i, id_j in combinations(nodes, 2):
+            if abs(id_i - id_j) <= 5:          
+                continue
+            if not any((e.i == id_i and e.j == id_j) or (e.i == id_j and e.j == id_i) for e in pose_graph.edges):
+                edge_q.put((id_i, id_j))
+
+
+    wait_for_all_queues([edge_q])
+
+    with lock:
+        print(f"Nodes: {len(pose_graph.nodes)}, Edges: {len(pose_graph.edges)}")
+
     
     # np.save('origins.npy',origins)
     print(f"[PostProcessing] Found {len(raw_subs)} raw subgraphs, partitioned into {len(part_subs)}.")
@@ -961,15 +1146,6 @@ def main():
     # with open('pose_graph.pkl','rb') as f:
     #     pose_graph = pickle.load(f)
 
-    pose_graph.objects.clear()
-    pose_graph.extended_objects.clear()
-    print(f"[LOADER] {pose_graph.objects} and {pose_graph.extended_objects}")
-    for obj in raw_subs:
-        parent_object = MapObject(dict(enumerate(obj)))
-        pose_graph.objects.append(parent_object)
-    objects = cluster_semantic_objects(part_subs, pose_graph, similarity_matrix, angle_threshold=15)
-    print(f"[Main] Finished with {len(objects)} detected objects.")
-    
     plt.figure(figsize=(8, 8))
     for node_id, node in pose_graph.nodes.items():
         if node.x is not None and node.y is not None:
@@ -987,6 +1163,6 @@ def main():
     # ### SAVE THE POSE GRAPH OBJECT
     with open('pose_graph_mechatronics_loop.pkl','wb') as f:
         pickle.dump(pose_graph,f)
-    save_clustered_masks(part_subs, pose_graph, masks)
+    # save_clustered_masks(part_subs, pose_graph, masks)
 if __name__ == "__main__":
     main()
