@@ -692,7 +692,7 @@ class FeatureExtractionWorker(threading.Thread):
                 node.features = output
                 node.keypoints = output['keypoints'].squeeze(0).cpu().numpy()
                 node.descriptors = output['descriptors'].squeeze(0).cpu().numpy()
-                # print(f"[FeatureExtractionWorker] Node {node_id} features extracted.")
+                print(f"[FeatureExtractionWorker] Node {node_id} features extracted.")
 
                 # Check if semantic masks are already available
                 if node.semantic_masks:
@@ -924,8 +924,8 @@ def add_images_to_graph(images, pose_graph, lock, seg_queue, feat_queue):
     for node_id, image in enumerate(images.values()):
         with lock:
             pose_graph.add_node(node_id, rgb_image=image)
-        seg_queue.put(node_id)
         feat_queue.put(node_id)
+        seg_queue.put(node_id)
         time.sleep(0.1)
 
 
@@ -1174,7 +1174,7 @@ def main():
     plt.xlabel("X (m)")
     plt.ylabel("Y (m)")
     plt.show()
-    plt.savefig()
+    plt.savefig('final_pose_graph.png')
     # ### SAVE THE POSE GRAPH OBJECT
     with open('pose_graph_mechatronics_loop.pkl','wb') as f:
         pickle.dump(pose_graph,f)
