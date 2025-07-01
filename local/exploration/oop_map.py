@@ -671,13 +671,14 @@ class SemanticSegmentationWorker(threading.Thread):
         return centroids
     
 class FeatureExtractionWorker(threading.Thread):
-    def __init__(self, queue, pose_graph, lock, feature_collection_queue,edge_queue, device=None):
+    def __init__(self, queue, pose_graph, lock, feature_collection_queue,edge_queue,seg_queue, device=None):
         super().__init__(daemon=True)
         self.queue = queue
         self.pose_graph = pose_graph
         self.lock = lock
         self.feature_collection_queue = feature_collection_queue
         self.edge_queue = edge_queue
+        self.seg_queue = seg_queue
         self._device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.detector = SuperPoint(max_num_keypoints=1024).eval().to(self._device)
 
@@ -699,6 +700,7 @@ class FeatureExtractionWorker(threading.Thread):
                     self.feature_collection_queue.put(node_id)
                     # print(f"[FeatureExtractionWorker] Node {node_id} pushed to feature collection queue.")
                 self.edge_queue.put(node_id)
+                self.seg_queue.put(node_id)
             self.queue.task_done()
 
 class EdgeCreator(threading.Thread):
@@ -904,7 +906,7 @@ def start_all_workers(pose_graph, lock, precomputed_masks, similarity_matrix, si
     use_swin=False,              # or True for Swin
     device="cuda"               # "cpu" if no GPU
     )
-    feat_worker = FeatureExtractionWorker(feat_queue, pose_graph, lock, fc_queue, edge_queue)
+    feat_worker = FeatureExtractionWorker(feat_queue, pose_graph, lock, fc_queue, edge_queue,seg_queue)
     edge_worker = EdgeCreator(pose_graph, lock, edge_queue, window_size=5)
     fc_worker = FeatureCollectionWorker(fc_queue, pose_graph, lock, similarity_matrix_lock, similarity_matrix)
 
@@ -925,7 +927,7 @@ def add_images_to_graph(images, pose_graph, lock, seg_queue, feat_queue):
         with lock:
             pose_graph.add_node(node_id, rgb_image=image)
         feat_queue.put(node_id)
-        seg_queue.put(node_id)
+        # seg_queue.put(node_id)
         time.sleep(0.1)
 
 
