@@ -609,16 +609,12 @@ class SemanticSegmentationWorker(threading.Thread):
             label = seg_info["id"]
             category = seg_info["category_id"]
             if category in [3,12,19,75]:
-                print(category)
                 dynamics_object_mask = (mask==label).astype(bool)
-                # plt.imshow(dynamics_object_mask,cmap='gray')
-                # plt.show()
                 kp = node.features['keypoints'][0].round().to(torch.long).cpu()
                 keypoints_drop = dynamics_object_mask[kp[:, 1], kp[:, 0]]
                 # keypoints_drop = np.array(keypoints_drop, dtype=bool)
                 keypoints_keep = ~keypoints_drop
                 keypoints_keep = torch.tensor(keypoints_keep, dtype=torch.bool).to(node.features["keypoints"].device)
-                print(keypoints_keep)
 
                 node.features["keypoints"] = node.features["keypoints"][:,keypoints_keep,:]
                 node.features["descriptors"] = node.features["descriptors"][:,keypoints_keep,:]
