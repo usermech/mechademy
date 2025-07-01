@@ -608,6 +608,21 @@ class SemanticSegmentationWorker(threading.Thread):
         for seg_info in segments_info:
             label = seg_info["id"]
             category = seg_info["category_id"]
+            if category in [3,12,19,75]:
+                print(category)
+                dynamics_object_mask = (mask==label).astype(bool)
+                # plt.imshow(dynamics_object_mask,cmap='gray')
+                # plt.show()
+                kp = node.features['keypoints'][0].round().to(torch.long).cpu()
+                keypoints_drop = dynamics_object_mask[kp[:, 1], kp[:, 0]]
+                # keypoints_drop = np.array(keypoints_drop, dtype=bool)
+                keypoints_keep = ~keypoints_drop
+                keypoints_keep = torch.tensor(keypoints_keep, dtype=torch.bool).to(node.features["keypoints"].device)
+                print(keypoints_keep)
+
+                node.features["keypoints"] = node.features["keypoints"][:,keypoints_keep,:]
+                node.features["descriptors"] = node.features["descriptors"][:,keypoints_keep,:]
+                node.features["keypoint_scores"] = node.features["keypoint_scores"][:,keypoints_keep]
             if category in [0, 2, 3, 5, 8, 11, 12, 13, 27]:
                 continue
             binary_mask = (mask==label).astype(np.uint8)
@@ -764,7 +779,7 @@ class EdgeCreator(threading.Thread):
                     node_j.keypoints is None or node_j.descriptors is None):
                 return
 
-        t_ij, R_ij = self.match_and_estimate(node_i, node_j)
+        t_ij, R_ij = self.match_and_estimate(node_i, node_j,300)
         if t_ij is not None and R_ij is not None:
             with self.lock:
                 self.pose_graph.add_edge(i, j, t_ij, R_ij)
@@ -774,16 +789,17 @@ class EdgeCreator(threading.Thread):
     def edge_exists(self, i, j):
         return any((e.i == i and e.j == j) or (e.i == j and e.j == i) for e in self.pose_graph.edges)
     
-    def match_and_estimate(self, node1, node2):
-        MIN_MATCH_COUNT = 200 # Minimum number of matches to consider a valid pose estimation
+    def match_and_estimate(self, node1, node2,min_matches=200):
         with torch.no_grad():
             pred = self.matcher({"image0": node1.features, "image1": node2.features})
         matches = pred["matches"][0].cpu().numpy()
-        if len(matches) < MIN_MATCH_COUNT:
+        if len(matches) < min_matches:
             return None, None
-
-        feats0 = node1.keypoints.copy()
-        feats1 = node2.keypoints.copy()
+        
+        feats0 = node1.features['keypoints'].squeeze(0).cpu().numpy()
+        feats1 = node2.features['keypoints'].squeeze(0).cpu().numpy()
+        # feats0 = node1.keypoints.copy()
+        # feats1 = node2.keypoints.copy()
         t_ij, R_ij = calculate_heading_angle_ransac(feats0, feats1, matches)
         return t_ij, R_ij
     
@@ -1158,6 +1174,7 @@ def main():
     plt.xlabel("X (m)")
     plt.ylabel("Y (m)")
     plt.show()
+    plt.savefig()
     # ### SAVE THE POSE GRAPH OBJECT
     with open('pose_graph_mechatronics_loop.pkl','wb') as f:
         pickle.dump(pose_graph,f)
