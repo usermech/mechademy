@@ -67,7 +67,7 @@ def main():
 
     # Configuration
     CONFIG = {
-        "hostname": "144.122.128.224",
+        "hostname": "192.168.68.71",
         "port": 22,
         "username": "romer",
         "password": "123",
