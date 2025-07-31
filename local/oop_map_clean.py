@@ -1078,42 +1078,42 @@ def get_merged_feature_collection(similarity_matrix, object_group,epsilon=0.1):
 
 def cluster_semantic_objects(subs, pose_graph, similarity_matrix, angle_threshold=15):
     for cluster_index, group in enumerate(subs):
-        # # parent_object = MapObject(dict(enumerate(obj)))
-        # # pose_graph.objects.append(parent_object)
-        # vectors = []
-        # for node_id, mask_id in obj:
-        #     if node_id not in pose_graph.nodes:
-        #         continue
-        #     node = pose_graph.nodes[node_id]
-        #     mask = node.semantic_masks[mask_id]
-        #     angle = node.centroids[mask_id] + node.theta
-        #     direction = np.array([np.cos(angle[0]), np.sin(angle[0])])
-        #     point = [node.x, node.y]
-        #     vectors.append((point, direction, (node_id, mask_id)))
+        vectors = []
+        for node_id, mask_id in group:
+            if node_id not in pose_graph.nodes:
+                continue
+            node = pose_graph.nodes[node_id]
+            mask = node.semantic_masks[mask_id]
+            angle = node.centroids[mask_id] + node.theta
+            direction = np.array([np.cos(angle[0]), np.sin(angle[0])])
+            point = [node.x, node.y]
+            vectors.append((point, direction, (node_id, mask_id)))
 
-        # remaining = vectors.copy()
-        # while len(remaining) >= 5:
-        #     ransac_input = [(np.array(p), np.array(d)) for p, d, _ in remaining]
-        #     intersection, inliers, _ = ransac_intersection(ransac_input, np.radians(angle_threshold), 100)
-        #     if len(inliers) < 4:
-        #         break
+        remaining = vectors.copy()
+        while len(remaining) >= 5:
+            ransac_input = [(np.array(p), np.array(d)) for p, d, _ in remaining]
+            intersection, inliers, _ = ransac_intersection(ransac_input, np.radians(angle_threshold), 100)
+            if len(inliers) < 4:
+                break
 
-        #     inlier_set = set((tuple(p), tuple(d)) for p, d in inliers)
-        #     group = []
-        #     next_remaining = []
-        #     for p, d, mask in remaining:
-        #         if (tuple(p), tuple(d)) in inlier_set:
-        #             group.append(mask)
-        #         else:
-        #             next_remaining.append((p, d, mask))
+            inlier_set = set((tuple(p), tuple(d)) for p, d in inliers)
+            inlier_masks = []
+            next_remaining = []
+            for p, d, mask in remaining:
+                if (tuple(p), tuple(d)) in inlier_set:
+                    inlier_masks.append(mask)
+                else:
+                    next_remaining.append((p, d, mask))
             
-        #     merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
-        #     pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=tuple(intersection),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
-        #     remaining = next_remaining
-        
-
-        merged_feature_collection = get_merged_feature_collection(similarity_matrix,group)
-        pose_graph.extended_objects.append(ChildMapObject(feature_collection=merged_feature_collection,position=(0,0),parent_object=None,parent_id = cluster_index,id_pairs=dict(enumerate(group))))
+            merged_feature_collection = get_merged_feature_collection(similarity_matrix, inlier_masks)
+            pose_graph.extended_objects.append(ChildMapObject(
+                feature_collection=merged_feature_collection,
+                position=tuple(intersection),
+                parent_object=None,
+                parent_id=cluster_index,
+                id_pairs=dict(enumerate(inlier_masks))
+            ))
+            remaining = next_remaining
 
     print(f"[PostProcessing] Clustered {len(pose_graph.extended_objects)} directional object groups with {len(pose_graph.objects)} parents.")
     return pose_graph.extended_objects
