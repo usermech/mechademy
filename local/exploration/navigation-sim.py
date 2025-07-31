@@ -756,6 +756,62 @@ class Tiago:
         rotated_frame = np.roll(self.frame, -index, axis=1)
         self.frame = rotated_frame
         return rotated_frame
+    
+    def rotate_incremental(self, target_angle, counter, current_angle=0.0):
+        """
+        Rotate the frame to a target angle (in radians) using the shortest direction.
+        Saves intermediate frames every 15 degrees and returns the final rotated image.
+
+        Parameters:
+        - target_angle: desired angle in radians
+        - counter: starting index for saved images
+        - current_angle: current orientation in radians (default 0)
+
+        Returns:
+        - final rotated frame
+        - updated counter
+        """
+        if self.frame is None:
+            print("No frame to rotate.")
+            return None, counter
+
+        save_dir = Path("./sim_navigation_output")
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Convert angles to degrees
+        current_deg = np.rad2deg(current_angle) % 360
+        target_deg = np.rad2deg(target_angle) % 360
+
+        # Compute shortest rotation direction
+        delta = (target_deg - current_deg + 540) % 360 - 180  # range [-180, 180]
+        direction = 1 if delta >= 0 else -1
+        total_rotation = abs(delta)
+
+        step_deg = 15
+        frame_width = self.frame.shape[1]
+
+        steps = int(total_rotation // step_deg)
+        remainder = total_rotation % step_deg
+
+        for step in range(1, steps + 1):
+            angle_step = current_deg + direction * step * step_deg
+            angle_step = angle_step % 360
+            index = int(angle_step / 360 * frame_width)
+            rotated_frame = np.roll(self.frame, -index, axis=1)
+            filename = save_dir / f"observation_{counter:03d}.png"
+            cv2.imwrite(str(filename), rotated_frame)
+            counter += 1
+
+        # Final precise rotation
+        final_angle = target_deg
+        final_index = int(final_angle / 360 * frame_width)
+        rotated_frame = np.roll(self.frame, -final_index, axis=1)
+        filename = save_dir / f"observation_{counter:03d}.png"
+        cv2.imwrite(str(filename), rotated_frame)
+
+        self.frame = rotated_frame
+        return rotated_frame, counter
+
 
     def move(self, heading):
         x1,y1 = self.position
@@ -1023,13 +1079,18 @@ class Navigator:
         # add -1 to the top of the path
         # path.insert(0,-1)
         # print(f"[Navigator] Planned path: {path}")
+        save_dir = "./sim_navigation_output"
+        os.makedirs(save_dir, exist_ok=True)
+
         while True:
-            cv2.imshow('Live Stream', current_observation)
+            filename = os.path.join(save_dir, f"observation_{self.image_counter:03d}.png")
+            cv2.imwrite(filename, current_observation)
+            self.image_counter += 1
+            # cv2.imshow('Live Stream', current_observation)
 
-            # Press 'q' to exit
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
+            # # Press 'q' to exit
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     break
             if len(path) < 2:
                 print("[Navigator] Reached final node.")
                 break
@@ -1050,7 +1111,7 @@ class Navigator:
                     break           # only one node left, we are done
             elif np.abs(heading) >= 0.09:
                 print('[Navigator] Rotating to target node')
-                current_observation = self.robot.rotate(heading)
+                current_observation,self.image_counter = self.robot.rotate_incremental(heading,self.image_counter)
                 self.robot.heading += heading
                 # cv2.imwrite('rotated.png',current_observation)
             else:
@@ -1059,7 +1120,7 @@ class Navigator:
                 print(f'[Navigator] Stepping towards target node from {self.robot.position} to {(x,y)}')
                 current_observation = self.robot.get_next_frame(x,y)
                 current_observation = self.robot.rotate(self.robot.heading)
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
         
 
 
