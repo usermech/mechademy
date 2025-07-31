@@ -1265,3 +1265,12 @@ def main():
     # save_clustered_masks(part_subs, pose_graph, masks)
 if __name__ == "__main__":
     main()
+
+print(f"\n[INFO] Total Extended Objects Detected: {len(pose_graph.extended_objects)}")
+for idx, obj in enumerate(pose_graph.extended_objects):
+    if obj.position is None:
+        print(f" - Object {idx} has no position.")
+        continue
+    x, y = obj.position
+    print(f" - Object {idx} (parent_id={obj.parent_id}): Position = ({x:.2f}, {y:.2f})")
+
