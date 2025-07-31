@@ -1050,7 +1050,7 @@ class Navigator:
                     break           # only one node left, we are done
             elif np.abs(heading) >= 0.09:
                 print('[Navigator] Rotating to target node')
-                current_observation = self.robot.rotate(heading,self.image_counter)
+                current_observation = self.robot.rotate(heading)
                 self.robot.heading += heading
                 # cv2.imwrite('rotated.png',current_observation)
             else:
